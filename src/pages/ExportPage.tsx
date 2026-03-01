@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import {
   Aperture,
+  ChevronDown,
+  ChevronRight,
   CheckSquare,
   Download,
   ExternalLink,
@@ -241,6 +243,8 @@ function ExportPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [isSessionEnriching, setIsSessionEnriching] = useState(false)
   const [isSnsStatsLoading, setIsSnsStatsLoading] = useState(true)
+  const [isBaseConfigLoading, setIsBaseConfigLoading] = useState(true)
+  const [isTaskCenterExpanded, setIsTaskCenterExpanded] = useState(false)
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [sessionMetrics, setSessionMetrics] = useState<Record<string, SessionMetrics>>({})
   const [searchKeyword, setSearchKeyword] = useState('')
@@ -296,6 +300,7 @@ function ExportPage() {
   const sessionLoadTokenRef = useRef(0)
   const loadingMetricsRef = useRef<Set<string>>(new Set())
   const preselectAppliedRef = useRef(false)
+  const writeLayoutControlRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     tasksRef.current = tasks
@@ -323,6 +328,7 @@ function ExportPage() {
   }, [])
 
   const loadBaseConfig = useCallback(async () => {
+    setIsBaseConfigLoading(true)
     try {
       const [savedPath, savedFormat, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedTxtColumns, savedConcurrency, savedWriteLayout, savedSessionMap, savedContentMap, savedSnsPostCount] = await Promise.all([
         configService.getExportPath(),
@@ -362,6 +368,8 @@ function ExportPage() {
       }))
     } catch (error) {
       console.error('加载导出配置失败:', error)
+    } finally {
+      setIsBaseConfigLoading(false)
     }
   }, [])
 
@@ -498,6 +506,18 @@ function ExportPage() {
   useEffect(() => {
     preselectAppliedRef.current = false
   }, [location.key, preselectSessionIds])
+
+  useEffect(() => {
+    if (!showWriteLayoutSelect) return
+
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (writeLayoutControlRef.current?.contains(event.target as Node)) return
+      setShowWriteLayoutSelect(false)
+    }
+
+    document.addEventListener('mousedown', handleOutsideClick)
+    return () => document.removeEventListener('mousedown', handleOutsideClick)
+  }, [showWriteLayoutSelect])
 
   useEffect(() => {
     if (preselectAppliedRef.current) return
@@ -1275,6 +1295,10 @@ function ExportPage() {
   const formatCandidateOptions = exportDialog.scope === 'sns'
     ? formatOptions.filter(option => option.value === 'html' || option.value === 'json')
     : formatOptions
+  const isTabCountComputing = isLoading || isSessionEnriching
+  const isSessionCardStatsLoading = isLoading || isBaseConfigLoading
+  const taskRunningCount = tasks.filter(task => task.status === 'running').length
+  const taskQueuedCount = tasks.filter(task => task.status === 'queued').length
   const showInitialSkeleton = isLoading && sessions.length === 0
 
   return (
@@ -1283,75 +1307,76 @@ function ExportPage() {
         <div className="global-export-controls">
           <div className="path-control">
             <span className="control-label">导出位置</span>
-            <div className="path-value" title={exportFolder}>{exportFolder || '未设置'}</div>
-            <div className="path-actions">
-              <button className="secondary-btn" onClick={() => exportFolder && void window.electronAPI.shell.openPath(exportFolder)}>
-                <ExternalLink size={14} /> 打开目录
-              </button>
+            <div className="path-inline-row">
               <button
-                className="secondary-btn"
-                onClick={async () => {
-                  const result = await window.electronAPI.dialog.openFile({
-                    title: '选择导出目录',
-                    properties: ['openDirectory']
-                  })
-                  if (!result.canceled && result.filePaths.length > 0) {
-                    const nextPath = result.filePaths[0]
-                    setExportFolder(nextPath)
-                    await configService.setExportPath(nextPath)
-                  }
-                }}
+                className="path-value path-link"
+                type="button"
+                title={exportFolder}
+                disabled={!exportFolder}
+                onClick={() => exportFolder && void window.electronAPI.shell.openPath(exportFolder)}
               >
-                <FolderOpen size={14} /> 更换目录
+                {exportFolder || '未设置'}
               </button>
+              <div className="path-actions">
+                <button className="secondary-btn" onClick={() => exportFolder && void window.electronAPI.shell.openPath(exportFolder)}>
+                  <ExternalLink size={14} /> 打开
+                </button>
+                <button
+                  className="secondary-btn"
+                  onClick={async () => {
+                    const result = await window.electronAPI.dialog.openFile({
+                      title: '选择导出目录',
+                      properties: ['openDirectory']
+                    })
+                    if (!result.canceled && result.filePaths.length > 0) {
+                      const nextPath = result.filePaths[0]
+                      setExportFolder(nextPath)
+                      await configService.setExportPath(nextPath)
+                    }
+                  }}
+                >
+                  <FolderOpen size={14} /> 更换
+                </button>
+              </div>
             </div>
           </div>
 
-          <div className="write-layout-control">
+          <div className="write-layout-control" ref={writeLayoutControlRef}>
             <span className="control-label">写入目录方式</span>
-            <button className="layout-trigger" onClick={() => setShowWriteLayoutSelect(prev => !prev)}>
+            <button
+              className={`layout-trigger ${showWriteLayoutSelect ? 'active' : ''}`}
+              type="button"
+              onClick={() => setShowWriteLayoutSelect(prev => !prev)}
+            >
               {writeLayoutLabel}
             </button>
-            {showWriteLayoutSelect && (
-              <div className="layout-dropdown">
-                {writeLayoutOptions.map(option => (
-                  <button
-                    key={option.value}
-                    className={`layout-option ${writeLayout === option.value ? 'active' : ''}`}
-                    onClick={async () => {
-                      setWriteLayout(option.value)
-                      setShowWriteLayoutSelect(false)
-                      await configService.setExportWriteLayout(option.value)
-                    }}
-                  >
-                    <span className="layout-option-label">{option.label}</span>
-                    <span className="layout-option-desc">{option.desc}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className={`layout-dropdown ${showWriteLayoutSelect ? 'open' : ''}`}>
+              {writeLayoutOptions.map(option => (
+                <button
+                  key={option.value}
+                  className={`layout-option ${writeLayout === option.value ? 'active' : ''}`}
+                  type="button"
+                  onClick={async () => {
+                    setWriteLayout(option.value)
+                    setShowWriteLayoutSelect(false)
+                    await configService.setExportWriteLayout(option.value)
+                  }}
+                >
+                  <span className="layout-option-label">{option.label}</span>
+                  <span className="layout-option-desc">{option.desc}</span>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
 
       <div className="content-card-grid">
-        {showInitialSkeleton ? Array.from({ length: 6 }).map((_, index) => (
-          <div key={`skeleton-card-${index}`} className="content-card skeleton-card">
-            <div className="skeleton-shimmer skeleton-line w-60"></div>
-            <div className="card-stats">
-              <div className="stat-item">
-                <span className="skeleton-shimmer skeleton-line w-40"></span>
-                <strong className="skeleton-shimmer skeleton-line w-20"></strong>
-              </div>
-              <div className="stat-item">
-                <span className="skeleton-shimmer skeleton-line w-40"></span>
-                <strong className="skeleton-shimmer skeleton-line w-20"></strong>
-              </div>
-            </div>
-            <div className="skeleton-shimmer skeleton-line w-100 h-32"></div>
-          </div>
-        )) : contentCards.map(card => {
+        {contentCards.map(card => {
           const Icon = card.icon
+          const isCardStatsLoading = card.type === 'sns'
+            ? (isSnsStatsLoading || isBaseConfigLoading)
+            : isSessionCardStatsLoading
           return (
             <div key={card.type} className="content-card">
               <div className="card-header">
@@ -1361,7 +1386,13 @@ function ExportPage() {
                 {card.stats.map((stat) => (
                   <div key={stat.label} className="stat-item">
                     <span>{stat.label}</span>
-                    <strong>{isSnsStatsLoading && card.type === 'sns' ? '--' : stat.value.toLocaleString()}</strong>
+                    <strong>
+                      {isCardStatsLoading ? (
+                        <span className="count-loading">
+                          统计中<span className="animated-ellipsis" aria-hidden="true">...</span>
+                        </span>
+                      ) : stat.value.toLocaleString()}
+                    </strong>
                   </div>
                 ))}
               </div>
@@ -1382,9 +1413,25 @@ function ExportPage() {
         })}
       </div>
 
-      <div className="task-center">
-        <div className="section-title">任务中心</div>
-        {tasks.length === 0 ? (
+      <div className={`task-center ${isTaskCenterExpanded ? 'expanded' : 'collapsed'}`}>
+        <div className="task-center-header">
+          <div className="section-title">任务中心</div>
+          <div className="task-summary">
+            <span>进行中 {taskRunningCount}</span>
+            <span>排队 {taskQueuedCount}</span>
+            <span>总计 {tasks.length}</span>
+          </div>
+          <button
+            className="task-collapse-btn"
+            type="button"
+            onClick={() => setIsTaskCenterExpanded(prev => !prev)}
+          >
+            {isTaskCenterExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            {isTaskCenterExpanded ? '收起' : '展开'}
+          </button>
+        </div>
+
+        {isTaskCenterExpanded && (tasks.length === 0 ? (
           <div className="task-empty">暂无任务。点击会话导出或卡片导出后会在这里创建任务。</div>
         ) : (
           <div className="task-list">
@@ -1422,23 +1469,23 @@ function ExportPage() {
               </div>
             ))}
           </div>
-        )}
+        ))}
       </div>
 
       <div className="session-table-section">
         <div className="table-toolbar">
           <div className="table-tabs" role="tablist" aria-label="会话类型">
             <button className={`tab-btn ${activeTab === 'private' ? 'active' : ''}`} onClick={() => setActiveTab('private')}>
-              私聊（{tabCounts.private}）
+              私聊 {isTabCountComputing ? <span className="count-loading">计算中<span className="animated-ellipsis" aria-hidden="true">...</span></span> : tabCounts.private}
             </button>
             <button className={`tab-btn ${activeTab === 'group' ? 'active' : ''}`} onClick={() => setActiveTab('group')}>
-              群聊（{tabCounts.group}）
+              群聊 {isTabCountComputing ? <span className="count-loading">计算中<span className="animated-ellipsis" aria-hidden="true">...</span></span> : tabCounts.group}
             </button>
             <button className={`tab-btn ${activeTab === 'official' ? 'active' : ''}`} onClick={() => setActiveTab('official')}>
-              公众号（{tabCounts.official}）
+              公众号 {isTabCountComputing ? <span className="count-loading">计算中<span className="animated-ellipsis" aria-hidden="true">...</span></span> : tabCounts.official}
             </button>
             <button className={`tab-btn ${activeTab === 'former_friend' ? 'active' : ''}`} onClick={() => setActiveTab('former_friend')}>
-              曾经的好友（{tabCounts.former_friend}）
+              曾经的好友 {isTabCountComputing ? <span className="count-loading">计算中<span className="animated-ellipsis" aria-hidden="true">...</span></span> : tabCounts.former_friend}
             </button>
           </div>
 
