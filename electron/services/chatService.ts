@@ -198,6 +198,7 @@ class ChatService {
   private sessionTablesCache = new Map<string, Array<{ tableName: string; dbPath: string }>>()
   private readonly sessionTablesCacheTtl = 300000 // 5分钟
   private sessionMessageCountCache = new Map<string, { count: number; updatedAt: number }>()
+  private sessionMessageCountHintCache = new Map<string, number>()
   private sessionMessageCountCacheScope = ''
   private readonly sessionMessageCountCacheTtlMs = 10 * 60 * 1000
 
@@ -369,6 +370,7 @@ class ChatService {
       if (!connectResult.success) {
         return { success: false, error: connectResult.error }
       }
+      this.refreshSessionMessageCountCacheScope()
 
       const result = await wcdbService.getSessions()
       if (!result.success || !result.sessions) {
@@ -462,6 +464,14 @@ class ChatService {
           lastSenderDisplayName: row.last_sender_display_name,
           selfWxid: myWxid
         })
+
+        if (typeof messageCountHint === 'number') {
+          this.sessionMessageCountHintCache.set(username, messageCountHint)
+          this.sessionMessageCountCache.set(username, {
+            count: messageCountHint,
+            updatedAt: Date.now()
+          })
+        }
       }
 
       // 批量拉取 extra_buffer 状态（isFolded/isMuted），不阻塞主流程
@@ -824,6 +834,16 @@ class ChatService {
         const cached = this.sessionMessageCountCache.get(sessionId)
         if (cached && now - cached.updatedAt <= this.sessionMessageCountCacheTtlMs) {
           counts[sessionId] = cached.count
+          continue
+        }
+
+        const hintCount = this.sessionMessageCountHintCache.get(sessionId)
+        if (typeof hintCount === 'number' && Number.isFinite(hintCount) && hintCount >= 0) {
+          counts[sessionId] = Math.floor(hintCount)
+          this.sessionMessageCountCache.set(sessionId, {
+            count: Math.floor(hintCount),
+            updatedAt: now
+          })
         } else {
           pendingSessionIds.push(sessionId)
         }
@@ -1511,6 +1531,7 @@ class ChatService {
     if (scope === this.sessionMessageCountCacheScope) return
     this.sessionMessageCountCacheScope = scope
     this.sessionMessageCountCache.clear()
+    this.sessionMessageCountHintCache.clear()
   }
 
   private async collectSessionExportStats(

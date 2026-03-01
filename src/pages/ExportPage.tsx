@@ -237,9 +237,8 @@ const timestampOrDash = (timestamp?: number): string => {
 }
 
 const createTaskId = (): string => `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-const MESSAGE_COUNT_VIEWPORT_PREFETCH = 120
-const MESSAGE_COUNT_BACKGROUND_BATCH = 90
-const MESSAGE_COUNT_BACKGROUND_INTERVAL_MS = 90
+const MESSAGE_COUNT_VIEWPORT_PREFETCH = 180
+const MESSAGE_COUNT_ACTIVE_TAB_WARMUP_LIMIT = 960
 const METRICS_VIEWPORT_PREFETCH = 90
 const METRICS_BACKGROUND_BATCH = 40
 const METRICS_BACKGROUND_INTERVAL_MS = 220
@@ -773,7 +772,7 @@ function ExportPage() {
     }
 
     try {
-      const batchSize = pending.length > 100 ? 48 : 28
+      const batchSize = pending.length > 260 ? 260 : pending.length
       for (let i = 0; i < pending.length; i += batchSize) {
         if (loadTokenAtStart !== sessionLoadTokenRef.current) return
         const chunk = pending.slice(i, i + batchSize)
@@ -873,6 +872,16 @@ function ExportPage() {
   }, [visibleSessions, ensureSessionMessageCounts])
 
   useEffect(() => {
+    if (sessions.length === 0) return
+    const activeTabTargets = sessions
+      .filter(session => session.kind === activeTab)
+      .sort((a, b) => (b.sortTimestamp || b.lastTimestamp || 0) - (a.sortTimestamp || a.lastTimestamp || 0))
+      .slice(0, MESSAGE_COUNT_ACTIVE_TAB_WARMUP_LIMIT)
+    if (activeTabTargets.length === 0) return
+    void ensureSessionMessageCounts(activeTabTargets)
+  }, [sessions, activeTab, ensureSessionMessageCounts])
+
+  useEffect(() => {
     const targets = visibleSessions.slice(0, METRICS_VIEWPORT_PREFETCH)
     void ensureSessionMetrics(targets)
   }, [visibleSessions, ensureSessionMetrics])
@@ -888,26 +897,6 @@ function ExportPage() {
     void ensureSessionMessageCounts(rangeSessions)
     void ensureSessionMetrics(rangeSessions)
   }, [ensureSessionMessageCounts, ensureSessionMetrics])
-
-  useEffect(() => {
-    if (sessions.length === 0) return
-    const prioritySessions = [
-      ...sessions.filter(session => session.kind === activeTab),
-      ...sessions.filter(session => session.kind !== activeTab)
-    ]
-    let cursor = 0
-    const timer = window.setInterval(() => {
-      if (cursor >= prioritySessions.length) {
-        window.clearInterval(timer)
-        return
-      }
-      const chunk = prioritySessions.slice(cursor, cursor + MESSAGE_COUNT_BACKGROUND_BATCH)
-      cursor += MESSAGE_COUNT_BACKGROUND_BATCH
-      void ensureSessionMessageCounts(chunk)
-    }, MESSAGE_COUNT_BACKGROUND_INTERVAL_MS)
-
-    return () => window.clearInterval(timer)
-  }, [sessions, activeTab, ensureSessionMessageCounts])
 
   useEffect(() => {
     if (sessions.length === 0) return
