@@ -32,10 +32,37 @@ function Sidebar() {
         const wxid = await configService.getMyWxid()
         let displayName = wxid || '未识别用户'
 
+        const normalizeName = (value?: string | null): string | undefined => {
+          if (!value) return undefined
+          const trimmed = value.trim()
+          if (!trimmed || trimmed.toLowerCase() === 'self') return undefined
+          return trimmed
+        }
+
+        let enrichedDisplayName: string | undefined
+        let fallbackSelfName: string | undefined
+
         if (wxid) {
-          const myContact = await window.electronAPI.chat.getContact(wxid)
-          const bestName = [myContact?.remark, myContact?.nickName, myContact?.alias, wxid].find(Boolean)
-          if (bestName) displayName = bestName
+          const [myContact, enrichedResult] = await Promise.all([
+            window.electronAPI.chat.getContact(wxid),
+            window.electronAPI.chat.enrichSessionsContactInfo([wxid, 'self'])
+          ])
+
+          enrichedDisplayName = normalizeName(enrichedResult.contacts?.[wxid]?.displayName)
+          fallbackSelfName = normalizeName(enrichedResult.contacts?.self?.displayName)
+
+          const bestName =
+            normalizeName(myContact?.remark) ||
+            normalizeName(myContact?.nickName) ||
+            normalizeName(myContact?.alias) ||
+            enrichedDisplayName ||
+            fallbackSelfName
+
+          if (bestName) {
+            displayName = bestName
+          } else if (fallbackSelfName && fallbackSelfName !== wxid) {
+            displayName = fallbackSelfName
+          }
         }
 
         let avatarUrl: string | undefined

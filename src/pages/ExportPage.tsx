@@ -177,7 +177,7 @@ const formatAbsoluteDate = (timestamp: number): string => {
 }
 
 const formatRecentExportTime = (timestamp?: number, now = Date.now()): string => {
-  if (!timestamp) return '未导出'
+  if (!timestamp) return ''
   const diff = Math.max(0, now - timestamp)
   const minute = 60 * 1000
   const hour = 60 * minute
@@ -290,12 +290,17 @@ function ExportPage() {
   const progressUnsubscribeRef = useRef<(() => void) | null>(null)
   const runningTaskIdRef = useRef<string | null>(null)
   const tasksRef = useRef<ExportTask[]>([])
+  const sessionMetricsRef = useRef<Record<string, SessionMetrics>>({})
   const loadingMetricsRef = useRef<Set<string>>(new Set())
   const preselectAppliedRef = useRef(false)
 
   useEffect(() => {
     tasksRef.current = tasks
   }, [tasks])
+
+  useEffect(() => {
+    sessionMetricsRef.current = sessionMetrics
+  }, [sessionMetrics])
 
   const preselectSessionIds = useMemo(() => {
     const state = location.state as { preselectSessionIds?: unknown; preselectSessionId?: unknown } | null
@@ -393,7 +398,7 @@ function ExportPage() {
       }, {})
 
       if (sessionsResult.success && sessionsResult.sessions) {
-        const nextSessions = sessionsResult.sessions
+        const baseSessions = sessionsResult.sessions
           .map((session) => {
             const contact = nextContactMap[session.username]
             const kind = toKindByContactType(session, contact)
@@ -405,7 +410,29 @@ function ExportPage() {
               avatarUrl: session.avatarUrl || contact?.avatarUrl
             } as SessionRow
           })
-          .sort((a, b) => (b.sortTimestamp || b.lastTimestamp || 0) - (a.sortTimestamp || a.lastTimestamp || 0))
+
+        const needsEnrichment = baseSessions
+          .filter(session => !session.avatarUrl || !session.displayName || session.displayName === session.username)
+          .map(session => session.username)
+
+        let nextSessions = baseSessions
+        if (needsEnrichment.length > 0) {
+          try {
+            const enrichResult = await window.electronAPI.chat.enrichSessionsContactInfo(needsEnrichment)
+            if (enrichResult.success && enrichResult.contacts) {
+              nextSessions = baseSessions.map((session) => {
+                const extra = enrichResult.contacts?.[session.username]
+                return {
+                  ...session,
+                  displayName: extra?.displayName || session.displayName || session.username,
+                  avatarUrl: extra?.avatarUrl || session.avatarUrl
+                }
+              })
+            }
+          } catch (enrichError) {
+            console.error('导出页补充会话联系人信息失败:', enrichError)
+          }
+        }
 
         setSessions(nextSessions)
       }
@@ -441,18 +468,31 @@ function ExportPage() {
 
   const visibleSessions = useMemo(() => {
     const keyword = searchKeyword.trim().toLowerCase()
-    return sessions.filter((session) => {
+    return sessions
+      .filter((session) => {
       if (session.kind !== activeTab) return false
       if (!keyword) return true
       return (
         (session.displayName || '').toLowerCase().includes(keyword) ||
         session.username.toLowerCase().includes(keyword)
       )
-    })
-  }, [sessions, activeTab, searchKeyword])
+      })
+      .sort((a, b) => {
+        const totalA = sessionMetrics[a.username]?.totalMessages ?? 0
+        const totalB = sessionMetrics[b.username]?.totalMessages ?? 0
+        if (totalB !== totalA) {
+          return totalB - totalA
+        }
+
+        const latestA = sessionMetrics[a.username]?.lastTimestamp ?? a.lastTimestamp ?? 0
+        const latestB = sessionMetrics[b.username]?.lastTimestamp ?? b.lastTimestamp ?? 0
+        return latestB - latestA
+      })
+  }, [sessions, activeTab, searchKeyword, sessionMetrics])
 
   const ensureSessionMetrics = useCallback(async (targetSessions: SessionRow[]) => {
-    const pending = targetSessions.filter(session => !sessionMetrics[session.username] && !loadingMetricsRef.current.has(session.username))
+    const currentMetrics = sessionMetricsRef.current
+    const pending = targetSessions.filter(session => !currentMetrics[session.username] && !loadingMetricsRef.current.has(session.username))
     if (pending.length === 0) return
 
     const updates: Record<string, SessionMetrics> = {}
@@ -494,12 +534,17 @@ function ExportPage() {
     if (Object.keys(updates).length > 0) {
       setSessionMetrics(prev => ({ ...prev, ...updates }))
     }
-  }, [sessionMetrics])
+  }, [])
 
   useEffect(() => {
     const targets = visibleSessions.slice(0, 40)
     void ensureSessionMetrics(targets)
   }, [visibleSessions, ensureSessionMetrics])
+
+  useEffect(() => {
+    if (sessions.length === 0) return
+    void ensureSessionMetrics(sessions)
+  }, [sessions, ensureSessionMetrics])
 
   const selectedCount = selectedSessions.size
 
@@ -1042,7 +1087,7 @@ function ExportPage() {
             </>
           ) : isQueued ? '排队中' : '导出'}
         </button>
-        <span className="row-export-time">{recent}</span>
+        {recent && <span className="row-export-time">{recent}</span>}
       </div>
     )
   }

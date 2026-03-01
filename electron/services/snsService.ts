@@ -242,6 +242,43 @@ class SnsService {
         return Number.isFinite(num) && num > 0 ? Math.floor(num) : 0
     }
 
+    private pickTimelineUsername(post: any): string {
+        const raw = post?.username ?? post?.user_name ?? post?.userName ?? ''
+        if (typeof raw !== 'string') return ''
+        return raw.trim()
+    }
+
+    private async getExportStatsFromTimeline(): Promise<{ totalPosts: number; totalFriends: number }> {
+        const pageSize = 500
+        const uniqueUsers = new Set<string>()
+        let totalPosts = 0
+        let offset = 0
+
+        for (let round = 0; round < 2000; round++) {
+            const result = await wcdbService.getSnsTimeline(pageSize, offset, undefined, undefined, 0, 0)
+            if (!result.success || !Array.isArray(result.timeline)) {
+                throw new Error(result.error || '获取朋友圈统计失败')
+            }
+
+            const rows = result.timeline
+            if (rows.length === 0) break
+
+            totalPosts += rows.length
+            for (const row of rows) {
+                const username = this.pickTimelineUsername(row)
+                if (username) uniqueUsers.add(username)
+            }
+
+            if (rows.length < pageSize) break
+            offset += rows.length
+        }
+
+        return {
+            totalPosts,
+            totalFriends: uniqueUsers.size
+        }
+    }
+
     private parseLikesFromXml(xml: string): string[] {
         if (!xml) return []
         const likes: string[] = []
@@ -369,27 +406,41 @@ class SnsService {
     async getExportStats(): Promise<{ success: boolean; data?: { totalPosts: number; totalFriends: number }; error?: string }> {
         try {
             let totalPosts = 0
+            let totalFriends = 0
+
             const postCountResult = await wcdbService.execQuery('sns', null, 'SELECT COUNT(1) AS total FROM SnsTimeLine')
             if (postCountResult.success && postCountResult.rows && postCountResult.rows.length > 0) {
                 totalPosts = this.parseCountValue(postCountResult.rows[0])
             }
 
-            let totalFriends = 0
-            const friendCountPrimary = await wcdbService.execQuery(
-                'sns',
-                null,
-                "SELECT COUNT(DISTINCT user_name) AS total FROM SnsTimeLine WHERE user_name IS NOT NULL AND user_name <> ''"
-            )
-            if (friendCountPrimary.success && friendCountPrimary.rows && friendCountPrimary.rows.length > 0) {
-                totalFriends = this.parseCountValue(friendCountPrimary.rows[0])
-            } else {
-                const friendCountFallback = await wcdbService.execQuery(
+            if (totalPosts > 0) {
+                const friendCountPrimary = await wcdbService.execQuery(
                     'sns',
                     null,
-                    "SELECT COUNT(DISTINCT userName) AS total FROM SnsTimeLine WHERE userName IS NOT NULL AND userName <> ''"
+                    "SELECT COUNT(DISTINCT user_name) AS total FROM SnsTimeLine WHERE user_name IS NOT NULL AND user_name <> ''"
                 )
-                if (friendCountFallback.success && friendCountFallback.rows && friendCountFallback.rows.length > 0) {
-                    totalFriends = this.parseCountValue(friendCountFallback.rows[0])
+                if (friendCountPrimary.success && friendCountPrimary.rows && friendCountPrimary.rows.length > 0) {
+                    totalFriends = this.parseCountValue(friendCountPrimary.rows[0])
+                } else {
+                    const friendCountFallback = await wcdbService.execQuery(
+                        'sns',
+                        null,
+                        "SELECT COUNT(DISTINCT userName) AS total FROM SnsTimeLine WHERE userName IS NOT NULL AND userName <> ''"
+                    )
+                    if (friendCountFallback.success && friendCountFallback.rows && friendCountFallback.rows.length > 0) {
+                        totalFriends = this.parseCountValue(friendCountFallback.rows[0])
+                    }
+                }
+            }
+
+            // 某些环境下 SnsTimeLine 统计查询会返回 0，这里回退到与导出同源的 timeline 接口统计。
+            if (totalPosts <= 0 || totalFriends <= 0) {
+                const timelineStats = await this.getExportStatsFromTimeline()
+                if (timelineStats.totalPosts > 0) {
+                    totalPosts = timelineStats.totalPosts
+                }
+                if (timelineStats.totalFriends > 0) {
+                    totalFriends = timelineStats.totalFriends
                 }
             }
 
