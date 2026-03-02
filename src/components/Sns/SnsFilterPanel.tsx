@@ -8,6 +8,7 @@ interface Contact {
     displayName: string
     avatarUrl?: string
     postCount?: number
+    postCountStatus?: 'loading' | 'ready' | 'error'
 }
 
 interface SnsFilterPanelProps {
@@ -56,6 +57,16 @@ export const SnsFilterPanel: React.FC<SnsFilterPanelProps> = ({
         setSearchKeyword('')
         setSelectedUsernames([])
         setJumpTargetDate(undefined)
+    }
+
+    const getPostCountDisplay = (contact: Contact) => {
+        if (contact.postCountStatus === 'error') {
+            return { text: '统计失败', className: 'is-error' }
+        }
+        if (contact.postCountStatus !== 'ready') {
+            return { text: '统计中', className: 'is-loading' }
+        }
+        return { text: `${Math.max(0, Number(contact.postCount || 0))} 条`, className: '' }
     }
 
     return (
@@ -144,7 +155,9 @@ export const SnsFilterPanel: React.FC<SnsFilterPanelProps> = ({
                     </div>
 
                     <div className="contact-list-scroll">
-                        {filteredContacts.map(contact => (
+                        {filteredContacts.map(contact => {
+                            const countDisplay = getPostCountDisplay(contact)
+                            return (
                             <div
                                 key={contact.username}
                                 className={`contact-row ${selectedUsernames.includes(contact.username) ? 'selected' : ''}`}
@@ -153,10 +166,11 @@ export const SnsFilterPanel: React.FC<SnsFilterPanelProps> = ({
                                 <Avatar src={contact.avatarUrl} name={contact.displayName} size={36} shape="rounded" />
                                 <div className="contact-meta">
                                     <span className="contact-name">{contact.displayName}</span>
-                                    <span className="contact-post-count">{Math.max(0, Number(contact.postCount || 0))} 条</span>
+                                    <span className={`contact-post-count ${countDisplay.className}`}>{countDisplay.text}</span>
                                 </div>
                             </div>
-                        ))}
+                            )
+                        })}
                         {filteredContacts.length === 0 && (
                             <div className="empty-state">没有找到联系人</div>
                         )}

@@ -5,13 +5,19 @@ import './SnsPage.scss'
 import { SnsPost } from '../types/sns'
 import { SnsPostItem } from '../components/Sns/SnsPostItem'
 import { SnsFilterPanel } from '../components/Sns/SnsFilterPanel'
+import * as configService from '../services/config'
+
+const SNS_PAGE_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const SNS_PAGE_CACHE_POST_LIMIT = 200
+const SNS_PAGE_CACHE_SCOPE_FALLBACK = '__default__'
 
 interface Contact {
     username: string
     displayName: string
     avatarUrl?: string
     type?: 'friend' | 'former_friend' | 'sns_only'
-    postCount: number
+    postCount?: number
+    postCountStatus: 'loading' | 'ready' | 'error'
 }
 
 interface SnsOverviewStats {
@@ -71,12 +77,30 @@ export default function SnsPage() {
     const [hasNewer, setHasNewer] = useState(false)
     const [loadingNewer, setLoadingNewer] = useState(false)
     const postsRef = useRef<SnsPost[]>([])
+    const overviewStatsRef = useRef<SnsOverviewStats>(overviewStats)
+    const selectedUsernamesRef = useRef<string[]>(selectedUsernames)
+    const searchKeywordRef = useRef(searchKeyword)
+    const jumpTargetDateRef = useRef<Date | undefined>(jumpTargetDate)
+    const cacheScopeKeyRef = useRef('')
     const scrollAdjustmentRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
+    const contactsLoadTokenRef = useRef(0)
 
     // Sync posts ref
     useEffect(() => {
         postsRef.current = posts
     }, [posts])
+    useEffect(() => {
+        overviewStatsRef.current = overviewStats
+    }, [overviewStats])
+    useEffect(() => {
+        selectedUsernamesRef.current = selectedUsernames
+    }, [selectedUsernames])
+    useEffect(() => {
+        searchKeywordRef.current = searchKeyword
+    }, [searchKeyword])
+    useEffect(() => {
+        jumpTargetDateRef.current = jumpTargetDate
+    }, [jumpTargetDate])
     // 在 DOM 更新后、浏览器绘制前同步调整滚动位置，防止向上加载时页面跳动
     useLayoutEffect(() => {
         const snapshot = scrollAdjustmentRef.current;
@@ -99,6 +123,78 @@ export default function SnsPage() {
         const day = String(date.getDate()).padStart(2, '0')
         return `${year}-${month}-${day}`
     }
+
+    const isDefaultViewNow = useCallback(() => {
+        return selectedUsernamesRef.current.length === 0 && !searchKeywordRef.current.trim() && !jumpTargetDateRef.current
+    }, [])
+
+    const ensureSnsCacheScopeKey = useCallback(async () => {
+        if (cacheScopeKeyRef.current) return cacheScopeKeyRef.current
+        const wxid = (await configService.getMyWxid())?.trim() || SNS_PAGE_CACHE_SCOPE_FALLBACK
+        const scopeKey = `sns_page:${wxid}`
+        cacheScopeKeyRef.current = scopeKey
+        return scopeKey
+    }, [])
+
+    const persistSnsPageCache = useCallback(async (patch?: { posts?: SnsPost[]; overviewStats?: SnsOverviewStats }) => {
+        if (!isDefaultViewNow()) return
+        try {
+            const scopeKey = await ensureSnsCacheScopeKey()
+            if (!scopeKey) return
+            let postsToStore = patch?.posts ?? postsRef.current
+            if (!patch?.posts && postsToStore.length === 0) {
+                const existingCache = await configService.getSnsPageCache(scopeKey)
+                if (existingCache && Array.isArray(existingCache.posts) && existingCache.posts.length > 0) {
+                    postsToStore = existingCache.posts as SnsPost[]
+                }
+            }
+            const overviewToStore = patch?.overviewStats ?? overviewStatsRef.current
+            await configService.setSnsPageCache(scopeKey, {
+                overviewStats: overviewToStore,
+                posts: postsToStore.slice(0, SNS_PAGE_CACHE_POST_LIMIT)
+            })
+        } catch (error) {
+            console.error('Failed to persist SNS page cache:', error)
+        }
+    }, [ensureSnsCacheScopeKey, isDefaultViewNow])
+
+    const hydrateSnsPageCache = useCallback(async () => {
+        try {
+            const scopeKey = await ensureSnsCacheScopeKey()
+            const cached = await configService.getSnsPageCache(scopeKey)
+            if (!cached) return
+            if (Date.now() - cached.updatedAt > SNS_PAGE_CACHE_TTL_MS) return
+
+            const cachedOverview = cached.overviewStats
+            if (cachedOverview) {
+                setOverviewStats({
+                    totalPosts: Math.max(0, Number(cachedOverview.totalPosts || 0)),
+                    totalFriends: Math.max(0, Number(cachedOverview.totalFriends || 0)),
+                    earliestTime: cachedOverview.earliestTime ?? null,
+                    latestTime: cachedOverview.latestTime ?? null
+                })
+            }
+
+            if (Array.isArray(cached.posts) && cached.posts.length > 0) {
+                const cachedPosts = cached.posts
+                    .filter((raw): raw is SnsPost => {
+                        if (!raw || typeof raw !== 'object') return false
+                        const row = raw as Record<string, unknown>
+                        return typeof row.id === 'string' && typeof row.createTime === 'number'
+                    })
+                    .slice(0, SNS_PAGE_CACHE_POST_LIMIT)
+                    .sort((a, b) => b.createTime - a.createTime)
+
+                if (cachedPosts.length > 0) {
+                    setPosts(cachedPosts)
+                    setHasMore(true)
+                    setHasNewer(false)
+                }
+            }
+        } catch (error) {
+            console.error('Failed to hydrate SNS page cache:', error)
+        }
+    }, [ensureSnsCacheScopeKey])
 
     const loadOverviewStats = useCallback(async () => {
         setOverviewStatsLoading(true)
@@ -129,18 +225,20 @@ export default function SnsPage() {
                 }
             }
 
-            setOverviewStats({
+            const nextOverviewStats = {
                 totalPosts,
                 totalFriends,
                 earliestTime,
                 latestTime
-            })
+            }
+            setOverviewStats(nextOverviewStats)
+            void persistSnsPageCache({ overviewStats: nextOverviewStats })
         } catch (error) {
             console.error('Failed to load SNS overview stats:', error)
         } finally {
             setOverviewStatsLoading(false)
         }
-    }, [])
+    }, [persistSnsPageCache])
 
     const loadPosts = useCallback(async (options: { reset?: boolean, direction?: 'older' | 'newer' } = {}) => {
         const { reset = false, direction = 'older' } = options
@@ -186,7 +284,9 @@ export default function SnsPage() {
                         const uniqueNewer = result.timeline.filter((p: SnsPost) => !existingIds.has(p.id));
 
                         if (uniqueNewer.length > 0) {
-                            setPosts(prev => [...uniqueNewer, ...prev].sort((a, b) => b.createTime - a.createTime));
+                            const merged = [...uniqueNewer, ...currentPosts].sort((a, b) => b.createTime - a.createTime)
+                            setPosts(merged);
+                            void persistSnsPageCache({ posts: merged })
                         }
                         setHasNewer(result.timeline.length >= limit);
                     } else {
@@ -216,6 +316,7 @@ export default function SnsPage() {
             if (result.success && result.timeline) {
                 if (reset) {
                     setPosts(result.timeline)
+                    void persistSnsPageCache({ posts: result.timeline })
                     setHasMore(result.timeline.length >= limit)
 
                     // Check for newer items above topTs
@@ -232,7 +333,9 @@ export default function SnsPage() {
                     }
                 } else {
                     if (result.timeline.length > 0) {
-                        setPosts(prev => [...prev, ...result.timeline!].sort((a, b) => b.createTime - a.createTime))
+                        const merged = [...postsRef.current, ...result.timeline!].sort((a, b) => b.createTime - a.createTime)
+                        setPosts(merged)
+                        void persistSnsPageCache({ posts: merged })
                     }
                     if (result.timeline.length < limit) {
                         setHasMore(false)
@@ -246,22 +349,18 @@ export default function SnsPage() {
             setLoadingNewer(false)
             loadingRef.current = false
         }
-    }, [selectedUsernames, searchKeyword, jumpTargetDate])
+    }, [jumpTargetDate, persistSnsPageCache, searchKeyword, selectedUsernames])
 
     // Load Contacts（合并好友+曾经好友+朋友圈发布者，enrichSessionsContactInfo 补充头像）
     const loadContacts = useCallback(async () => {
+        const requestToken = ++contactsLoadTokenRef.current
         setContactsLoading(true)
         try {
-            // 并行获取联系人列表、朋友圈发布者列表和每个发布者的动态条数
-            const [contactsResult, snsResult, snsCountsResult] = await Promise.all([
+            // 先加载联系人基础信息，再异步补齐朋友圈条数
+            const [contactsResult, snsResult] = await Promise.all([
                 window.electronAPI.chat.getContacts(),
-                window.electronAPI.sns.getSnsUsernames(),
-                window.electronAPI.sns.getUserPostCounts()
+                window.electronAPI.sns.getSnsUsernames()
             ])
-            const snsPostCountMap = new Map<string, number>(
-                Object.entries(snsCountsResult.success ? (snsCountsResult.data || {}) : {})
-                    .map(([username, count]) => [username, Math.max(0, Number(count || 0))])
-            )
 
             // 以联系人为基础，按 username 去重
             const contactMap = new Map<string, Contact>()
@@ -275,7 +374,7 @@ export default function SnsPage() {
                             displayName: c.displayName,
                             avatarUrl: c.avatarUrl,
                             type: c.type === 'former_friend' ? 'former_friend' : 'friend',
-                            postCount: snsPostCountMap.get(c.username) || 0
+                            postCountStatus: 'loading'
                         })
                     }
                 }
@@ -285,7 +384,7 @@ export default function SnsPage() {
             if (snsResult.success && snsResult.usernames) {
                 for (const u of snsResult.usernames) {
                     if (!contactMap.has(u)) {
-                        contactMap.set(u, { username: u, displayName: u, type: 'sns_only', postCount: snsPostCountMap.get(u) || 0 })
+                        contactMap.set(u, { username: u, displayName: u, type: 'sns_only', postCountStatus: 'loading' })
                     }
                 }
             }
@@ -306,32 +405,63 @@ export default function SnsPage() {
                 }
             }
 
+            if (requestToken !== contactsLoadTokenRef.current) return
             setContacts(Array.from(contactMap.values()))
+
+            const snsCountsResult = await window.electronAPI.sns.getUserPostCounts()
+            if (requestToken !== contactsLoadTokenRef.current) return
+
+            if (snsCountsResult.success && snsCountsResult.data) {
+                const snsPostCountMap = new Map<string, number>(
+                    Object.entries(snsCountsResult.data).map(([username, count]) => [username, Math.max(0, Number(count || 0))])
+                )
+                setContacts(prev => prev.map(contact => ({
+                    ...contact,
+                    postCount: snsPostCountMap.get(contact.username) ?? 0,
+                    postCountStatus: 'ready'
+                })))
+            } else {
+                console.error('Failed to load SNS contact post counts:', snsCountsResult.error)
+                setContacts(prev => prev.map(contact => ({
+                    ...contact,
+                    postCountStatus: 'error'
+                })))
+            }
         } catch (error) {
+            if (requestToken !== contactsLoadTokenRef.current) return
             console.error('Failed to load contacts:', error)
+            setContacts(prev => prev.map(contact => ({
+                ...contact,
+                postCountStatus: 'error'
+            })))
         } finally {
-            setContactsLoading(false)
+            if (requestToken === contactsLoadTokenRef.current) {
+                setContactsLoading(false)
+            }
         }
     }, [])
 
     // Initial Load & Listeners
     useEffect(() => {
+        void hydrateSnsPageCache()
         loadContacts()
         loadOverviewStats()
-    }, [loadContacts, loadOverviewStats])
+    }, [hydrateSnsPageCache, loadContacts, loadOverviewStats])
 
     useEffect(() => {
         const handleChange = () => {
+            cacheScopeKeyRef.current = ''
             // wxid changed, reset everything
             setPosts([]); setHasMore(true); setHasNewer(false);
             setSelectedUsernames([]); setSearchKeyword(''); setJumpTargetDate(undefined);
+            void hydrateSnsPageCache()
             loadContacts();
             loadOverviewStats();
             loadPosts({ reset: true });
         }
         window.addEventListener('wxid-changed', handleChange as EventListener)
         return () => window.removeEventListener('wxid-changed', handleChange as EventListener)
-    }, [loadContacts, loadOverviewStats, loadPosts])
+    }, [hydrateSnsPageCache, loadContacts, loadOverviewStats, loadPosts])
 
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -445,7 +575,11 @@ export default function SnsPage() {
                                     }}
                                     onDebug={(p) => setDebugPost(p)}
                                     onDelete={(postId) => {
-                                        setPosts(prev => prev.filter(p => p.id !== postId))
+                                        setPosts(prev => {
+                                            const next = prev.filter(p => p.id !== postId)
+                                            void persistSnsPageCache({ posts: next })
+                                            return next
+                                        })
                                         loadOverviewStats()
                                     }}
                                 />

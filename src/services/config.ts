@@ -38,6 +38,7 @@ export const CONFIG_KEYS = {
   EXPORT_LAST_SNS_POST_COUNT: 'exportLastSnsPostCount',
   EXPORT_SESSION_MESSAGE_COUNT_CACHE_MAP: 'exportSessionMessageCountCacheMap',
   EXPORT_SNS_STATS_CACHE_MAP: 'exportSnsStatsCacheMap',
+  SNS_PAGE_CACHE_MAP: 'snsPageCacheMap',
   CONTACTS_LOAD_TIMEOUT_MS: 'contactsLoadTimeoutMs',
   CONTACTS_LIST_CACHE_MAP: 'contactsListCacheMap',
   CONTACTS_AVATAR_CACHE_MAP: 'contactsAvatarCacheMap',
@@ -465,6 +466,19 @@ export interface ExportSnsStatsCacheItem {
   totalFriends: number
 }
 
+export interface SnsPageOverviewCache {
+  totalPosts: number
+  totalFriends: number
+  earliestTime: number | null
+  latestTime: number | null
+}
+
+export interface SnsPageCacheItem {
+  updatedAt: number
+  overviewStats: SnsPageOverviewCache
+  posts: unknown[]
+}
+
 export interface ContactsListCacheContact {
   username: string
   displayName: string
@@ -574,6 +588,70 @@ export async function setExportSnsStatsCache(
   }
 
   await config.set(CONFIG_KEYS.EXPORT_SNS_STATS_CACHE_MAP, map)
+}
+
+export async function getSnsPageCache(scopeKey: string): Promise<SnsPageCacheItem | null> {
+  if (!scopeKey) return null
+  const value = await config.get(CONFIG_KEYS.SNS_PAGE_CACHE_MAP)
+  if (!value || typeof value !== 'object') return null
+  const rawMap = value as Record<string, unknown>
+  const rawItem = rawMap[scopeKey]
+  if (!rawItem || typeof rawItem !== 'object') return null
+
+  const raw = rawItem as Record<string, unknown>
+  const rawOverview = raw.overviewStats
+  const rawPosts = raw.posts
+  if (!rawOverview || typeof rawOverview !== 'object' || !Array.isArray(rawPosts)) return null
+
+  const overviewObj = rawOverview as Record<string, unknown>
+  const normalizeNumber = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : 0)
+  const normalizeNullableTimestamp = (v: unknown) => {
+    if (v === null || v === undefined) return null
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.floor(v)
+    return null
+  }
+
+  return {
+    updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0,
+    overviewStats: {
+      totalPosts: Math.max(0, normalizeNumber(overviewObj.totalPosts)),
+      totalFriends: Math.max(0, normalizeNumber(overviewObj.totalFriends)),
+      earliestTime: normalizeNullableTimestamp(overviewObj.earliestTime),
+      latestTime: normalizeNullableTimestamp(overviewObj.latestTime)
+    },
+    posts: rawPosts
+  }
+}
+
+export async function setSnsPageCache(
+  scopeKey: string,
+  payload: { overviewStats: SnsPageOverviewCache; posts: unknown[] }
+): Promise<void> {
+  if (!scopeKey) return
+  const current = await config.get(CONFIG_KEYS.SNS_PAGE_CACHE_MAP)
+  const map = current && typeof current === 'object'
+    ? { ...(current as Record<string, unknown>) }
+    : {}
+
+  const normalizeNumber = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0)
+  const normalizeNullableTimestamp = (v: unknown) => {
+    if (v === null || v === undefined) return null
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.floor(v)
+    return null
+  }
+
+  map[scopeKey] = {
+    updatedAt: Date.now(),
+    overviewStats: {
+      totalPosts: normalizeNumber(payload?.overviewStats?.totalPosts),
+      totalFriends: normalizeNumber(payload?.overviewStats?.totalFriends),
+      earliestTime: normalizeNullableTimestamp(payload?.overviewStats?.earliestTime),
+      latestTime: normalizeNullableTimestamp(payload?.overviewStats?.latestTime)
+    },
+    posts: Array.isArray(payload?.posts) ? payload.posts : []
+  }
+
+  await config.set(CONFIG_KEYS.SNS_PAGE_CACHE_MAP, map)
 }
 
 // 获取通讯录加载超时阈值（毫秒）
