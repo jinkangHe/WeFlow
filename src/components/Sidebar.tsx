@@ -282,6 +282,11 @@ function Sidebar({ collapsed }: SidebarProps) {
     setShowClearAccountDialog(true)
   }
 
+  const openSettingsFromAccountMenu = () => {
+    setIsAccountMenuOpen(false)
+    navigate('/settings')
+  }
+
   const handleConfirmClearAccountData = async () => {
     if (!canConfirmClear || isClearingAccountData) return
     setIsClearingAccountData(true)
@@ -420,16 +425,43 @@ function Sidebar({ collapsed }: SidebarProps) {
       </nav>
 
       <div className="sidebar-footer">
+        <button
+          className="nav-item"
+          onClick={() => {
+            if (authEnabled) {
+              setLocked(true)
+              return
+            }
+            navigate('/settings', { state: { initialTab: 'security' } })
+          }}
+          title={collapsed ? (authEnabled ? '锁定' : '未锁定') : undefined}
+        >
+          <span className="nav-icon">{authEnabled ? <Lock size={20} /> : <LockOpen size={20} />}</span>
+          <span className="nav-label">{authEnabled ? '锁定' : '未锁定'}</span>
+        </button>
+
         <div className="sidebar-user-card-wrap" ref={accountCardWrapRef}>
           {isAccountMenuOpen && (
-            <button
-              className="sidebar-user-clear-trigger"
-              onClick={openClearAccountDialog}
-              type="button"
-            >
-              <Trash2 size={14} />
-              <span>清除此账号所有数据</span>
-            </button>
+            <div className="sidebar-user-menu" role="menu" aria-label="账号菜单">
+              <button
+                className="sidebar-user-menu-item"
+                onClick={openSettingsFromAccountMenu}
+                type="button"
+                role="menuitem"
+              >
+                <Settings size={14} />
+                <span>设置</span>
+              </button>
+              <button
+                className="sidebar-user-menu-item danger"
+                onClick={openClearAccountDialog}
+                type="button"
+                role="menuitem"
+              >
+                <Trash2 size={14} />
+                <span>清除数据</span>
+              </button>
+            </div>
           )}
           <div
             className={`sidebar-user-card ${isAccountMenuOpen ? 'menu-open' : ''}`}
@@ -458,33 +490,6 @@ function Sidebar({ collapsed }: SidebarProps) {
             )}
           </div>
         </div>
-
-        <button
-          className="nav-item"
-          onClick={() => {
-            if (authEnabled) {
-              setLocked(true)
-              return
-            }
-            navigate('/settings', { state: { initialTab: 'security' } })
-          }}
-          title={collapsed ? (authEnabled ? '锁定' : '未锁定') : undefined}
-        >
-          <span className="nav-icon">{authEnabled ? <Lock size={20} /> : <LockOpen size={20} />}</span>
-          <span className="nav-label">{authEnabled ? '锁定' : '未锁定'}</span>
-        </button>
-
-        <NavLink
-          to="/settings"
-          className={`nav-item ${isActive('/settings') ? 'active' : ''}`}
-          title={collapsed ? '设置' : undefined}
-        >
-          <span className="nav-icon">
-            <Settings size={20} />
-          </span>
-          <span className="nav-label">设置</span>
-        </NavLink>
-
       </div>
 
       {showClearAccountDialog && (
