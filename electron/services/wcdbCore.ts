@@ -148,13 +148,8 @@ export class WcdbCore {
     }
   }
 
-  // 使用命名管道 IPC (仅 Windows)
+  // 使用命名管道/socket IPC (Windows: Named Pipe, macOS: Unix Socket)
   startMonitor(callback: (type: string, json: string) => void): boolean {
-    if (process.platform !== 'win32') {
-      console.warn('[wcdbCore] Monitor not supported on macOS')
-      return false
-    }
-    
     if (!this.wcdbStartMonitorPipe) {
       return false
     }
@@ -178,7 +173,6 @@ export class WcdbCore {
           }
         } catch {}
       }
-
       this.connectMonitorPipe(pipePath)
       return true
     } catch (e) {
@@ -195,13 +189,18 @@ export class WcdbCore {
     setTimeout(() => {
       if (!this.monitorCallback) return
 
-      this.monitorPipeClient = net.createConnection(this.monitorPipePath, () => {
-      })
+      this.monitorPipeClient = net.createConnection(this.monitorPipePath, () => {})
 
       let buffer = ''
       this.monitorPipeClient.on('data', (data: Buffer) => {
-        buffer += data.toString('utf8')
-        const lines = buffer.split('\n')
+        const rawChunk = data.toString('utf8')
+        // macOS 侧可能使用 '\0' 或无换行分隔，统一归一化并兜底拆包
+        const normalizedChunk = rawChunk
+          .replace(/\u0000/g, '\n')
+          .replace(/}\s*{/g, '}\n{')
+
+        buffer += normalizedChunk
+        const lines = buffer.split(/\r?\n/)
         buffer = lines.pop() || ''
         for (const line of lines) {
           if (line.trim()) {
@@ -213,9 +212,22 @@ export class WcdbCore {
             }
           }
         }
+
+        // 兜底：如果没有分隔符但已形成完整 JSON，则直接上报
+        const tail = buffer.trim()
+        if (tail.startsWith('{') && tail.endsWith('}')) {
+          try {
+            const parsed = JSON.parse(tail)
+            this.monitorCallback?.(parsed.action || 'update', tail)
+            buffer = ''
+          } catch {
+            // 不可解析则继续等待下一块数据
+          }
+        }
       })
 
       this.monitorPipeClient.on('error', () => {
+        // 保持静默，与现有错误处理策略一致
       })
 
       this.monitorPipeClient.on('close', () => {
@@ -583,6 +595,8 @@ export class WcdbCore {
         const resourcePaths = [
           dllDir,  // DLL 所在目录
           dirname(dllDir),  // 上级目录
+          process.resourcesPath,  // 打包后 Contents/Resources
+          process.resourcesPath ? join(process.resourcesPath as string, 'resources') : null,  // Contents/Resources/resources
           this.resourcesPath,  // 配置的资源路径
           join(process.cwd(), 'resources')  // 开发环境
         ].filter(Boolean)

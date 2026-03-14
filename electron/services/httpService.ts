@@ -340,6 +340,7 @@ class HttpService {
         const trimmedRows = allRows.slice(0, limit)
         const finalHasMore = hasMore || allRows.length > limit
         const messages = chatService.mapRowsToMessagesForApi(trimmedRows)
+        await this.backfillMissingSenderUsernames(talker, messages)
         return { success: true, messages, hasMore: finalHasMore }
       } finally {
         await wcdbService.closeMessageCursor(cursor)
@@ -357,6 +358,41 @@ class HttpService {
     const parsed = parseInt(value || '', 10)
     if (!Number.isFinite(parsed)) return defaultValue
     return Math.min(Math.max(parsed, min), max)
+  }
+
+  private async backfillMissingSenderUsernames(talker: string, messages: Message[]): Promise<void> {
+    if (!talker.endsWith('@chatroom')) return
+
+    const targets = messages.filter((msg) => !String(msg.senderUsername || '').trim())
+    if (targets.length === 0) return
+
+    const myWxid = (this.configService.get('myWxid') || '').trim()
+    for (const msg of targets) {
+      const localId = Number(msg.localId || 0)
+      if (Number.isFinite(localId) && localId > 0) {
+        try {
+          const detail = await wcdbService.getMessageById(talker, localId)
+          if (detail.success && detail.message) {
+            const hydrated = chatService.mapRowsToMessagesForApi([detail.message])[0]
+            if (hydrated?.senderUsername) {
+              msg.senderUsername = hydrated.senderUsername
+            }
+            if ((msg.isSend === null || msg.isSend === undefined) && hydrated?.isSend !== undefined) {
+              msg.isSend = hydrated.isSend
+            }
+            if (!msg.rawContent && hydrated?.rawContent) {
+              msg.rawContent = hydrated.rawContent
+            }
+          }
+        } catch (error) {
+          console.warn('[HttpService] backfill sender failed:', error)
+        }
+      }
+
+      if (!msg.senderUsername && msg.isSend === 1 && myWxid) {
+        msg.senderUsername = myWxid
+      }
+    }
   }
 
   private parseBooleanParam(url: URL, keys: string[], defaultValue: boolean = false): boolean {
@@ -778,6 +814,49 @@ class HttpService {
     return {}
   }
 
+  private lookupGroupNickname(groupNicknamesMap: Map<string, string>, sender: string): string {
+    if (!sender) return ''
+    return groupNicknamesMap.get(sender) || groupNicknamesMap.get(sender.toLowerCase()) || ''
+  }
+
+  private resolveChatLabSenderInfo(
+    msg: Message,
+    talkerId: string,
+    talkerName: string,
+    myWxid: string,
+    isGroup: boolean,
+    senderNames: Record<string, string>,
+    groupNicknamesMap: Map<string, string>
+  ): { sender: string; accountName: string; groupNickname?: string } {
+    let sender = String(msg.senderUsername || '').trim()
+    let usedUnknownPlaceholder = false
+    const sameAsMe = sender && myWxid && sender.toLowerCase() === myWxid.toLowerCase()
+    const isSelf = msg.isSend === 1 || sameAsMe
+
+    if (!sender && isSelf && myWxid) {
+      sender = myWxid
+    }
+
+    if (!sender) {
+      if (msg.localType === 10000 || msg.localType === 266287972401) {
+        sender = talkerId
+      } else {
+        sender = `unknown_sender_${msg.localId || msg.createTime || 0}`
+        usedUnknownPlaceholder = true
+      }
+    }
+
+    const groupNickname = isGroup ? this.lookupGroupNickname(groupNicknamesMap, sender) : ''
+    const displayName = senderNames[sender] || groupNickname || (usedUnknownPlaceholder ? '' : sender)
+    const accountName = isSelf ? '我' : (displayName || '未知发送者')
+
+    return {
+      sender,
+      accountName,
+      groupNickname: groupNickname || undefined
+    }
+  }
+
   /**
    * 转换为 ChatLab 格式
    */
@@ -817,36 +896,24 @@ class HttpService {
     // 构建成员列表
     const memberMap = new Map<string, ChatLabMember>()
     for (const msg of messages) {
-      const sender = msg.senderUsername || ''
-      if (sender && !memberMap.has(sender)) {
-        const displayName = senderNames[sender] || sender
-        const isSelf = sender === myWxid || sender.toLowerCase() === myWxid.toLowerCase()
-        // 获取群昵称（尝试多种方式）
-        const groupNickname = isGroup 
-          ? (groupNicknamesMap.get(sender) || groupNicknamesMap.get(sender.toLowerCase()) || '')
-          : ''
-        memberMap.set(sender, {
-          platformId: sender,
-          accountName: isSelf ? '我' : displayName,
-          groupNickname: groupNickname || undefined
+      const senderInfo = this.resolveChatLabSenderInfo(msg, talkerId, talkerName, myWxid, isGroup, senderNames, groupNicknamesMap)
+      if (!memberMap.has(senderInfo.sender)) {
+        memberMap.set(senderInfo.sender, {
+          platformId: senderInfo.sender,
+          accountName: senderInfo.accountName,
+          groupNickname: senderInfo.groupNickname
         })
       }
     }
 
     // 转换消息
     const chatLabMessages: ChatLabMessage[] = messages.map(msg => {
-      const sender = msg.senderUsername || ''
-      const isSelf = msg.isSend === 1 || sender === myWxid
-      const accountName = isSelf ? '我' : (senderNames[sender] || sender)
-      // 获取该发送者的群昵称
-      const groupNickname = isGroup 
-        ? (groupNicknamesMap.get(sender) || groupNicknamesMap.get(sender.toLowerCase()) || '')
-        : ''
+      const senderInfo = this.resolveChatLabSenderInfo(msg, talkerId, talkerName, myWxid, isGroup, senderNames, groupNicknamesMap)
 
       return {
-        sender,
-        accountName,
-        groupNickname: groupNickname || undefined,
+        sender: senderInfo.sender,
+        accountName: senderInfo.accountName,
+        groupNickname: senderInfo.groupNickname,
         timestamp: msg.createTime,
         type: this.mapMessageType(msg.localType, msg),
         content: this.getMessageContent(msg),

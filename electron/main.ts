@@ -235,13 +235,32 @@ const isYearsLoadCanceled = (taskId: string): boolean => {
   return task?.canceled === true
 }
 
+const setupCustomTitleBarWindow = (win: BrowserWindow): void => {
+  if (process.platform === 'darwin') {
+    win.setWindowButtonVisibility(false)
+  }
+
+  const emitMaximizeState = () => {
+    if (win.isDestroyed()) return
+    win.webContents.send('window:maximizeStateChanged', win.isMaximized() || win.isFullScreen())
+  }
+
+  win.on('maximize', emitMaximizeState)
+  win.on('unmaximize', emitMaximizeState)
+  win.on('enter-full-screen', emitMaximizeState)
+  win.on('leave-full-screen', emitMaximizeState)
+  win.webContents.on('did-finish-load', emitMaximizeState)
+}
+
 function createWindow(options: { autoShow?: boolean } = {}) {
   // 获取图标路径 - 打包后在 resources 目录
   const { autoShow = true } = options
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   const iconPath = isDev
     ? join(__dirname, '../public/icon.ico')
-    : join(process.resourcesPath, 'icon.ico')
+    : (process.platform === 'darwin' 
+        ? join(process.resourcesPath, 'icon.icns')
+        : join(process.resourcesPath, 'icon.ico'))
 
   const win = new BrowserWindow({
     width: 1400,
@@ -256,13 +275,10 @@ function createWindow(options: { autoShow?: boolean } = {}) {
       webSecurity: false // Allow loading local files (video playback)
     },
     titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#00000000',
-      symbolColor: '#1a1a1a',
-      height: 40
-    },
+    titleBarOverlay: false,
     show: false
   })
+  setupCustomTitleBarWindow(win)
 
   // 窗口准备好后显示
   // Splash 模式下不在这里 show，由启动流程统一控制
@@ -367,7 +383,9 @@ function createAgreementWindow() {
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   const iconPath = isDev
     ? join(__dirname, '../public/icon.ico')
-    : join(process.resourcesPath, 'icon.ico')
+    : (process.platform === 'darwin' 
+        ? join(process.resourcesPath, 'icon.icns')
+        : join(process.resourcesPath, 'icon.ico'))
 
   const isDark = nativeTheme.shouldUseDarkColors
 
@@ -417,7 +435,9 @@ function createSplashWindow(): BrowserWindow {
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   const iconPath = isDev
     ? join(__dirname, '../public/icon.ico')
-    : join(process.resourcesPath, 'icon.ico')
+    : (process.platform === 'darwin' 
+        ? join(process.resourcesPath, 'icon.icns')
+        : join(process.resourcesPath, 'icon.ico'))
 
   splashWindow = new BrowserWindow({
     width: 760,
@@ -488,7 +508,9 @@ function createOnboardingWindow() {
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   const iconPath = isDev
     ? join(__dirname, '../public/icon.ico')
-    : join(process.resourcesPath, 'icon.ico')
+    : (process.platform === 'darwin' 
+        ? join(process.resourcesPath, 'icon.icns')
+        : join(process.resourcesPath, 'icon.ico'))
 
   onboardingWindow = new BrowserWindow({
     width: 960,
@@ -534,7 +556,9 @@ function createVideoPlayerWindow(videoPath: string, videoWidth?: number, videoHe
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   const iconPath = isDev
     ? join(__dirname, '../public/icon.ico')
-    : join(process.resourcesPath, 'icon.ico')
+    : (process.platform === 'darwin' 
+        ? join(process.resourcesPath, 'icon.icns')
+        : join(process.resourcesPath, 'icon.ico'))
 
   // 获取屏幕尺寸
   const { screen } = require('electron')
@@ -632,7 +656,9 @@ function createImageViewerWindow(imagePath: string, liveVideoPath?: string) {
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   const iconPath = isDev
     ? join(__dirname, '../public/icon.ico')
-    : join(process.resourcesPath, 'icon.ico')
+    : (process.platform === 'darwin' 
+        ? join(process.resourcesPath, 'icon.icns')
+        : join(process.resourcesPath, 'icon.ico'))
 
   const win = new BrowserWindow({
     width: 900,
@@ -646,16 +672,13 @@ function createImageViewerWindow(imagePath: string, liveVideoPath?: string) {
       nodeIntegration: false,
       webSecurity: false // 允许加载本地文件
     },
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#00000000',
-      symbolColor: '#ffffff',
-      height: 40
-    },
+    frame: false,
     show: false,
     backgroundColor: '#000000',
     autoHideMenuBar: true
   })
+
+  setupCustomTitleBarWindow(win)
 
   win.once('ready-to-show', () => {
     win.show()
@@ -693,7 +716,9 @@ function createChatHistoryWindow(sessionId: string, messageId: number) {
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   const iconPath = isDev
     ? join(__dirname, '../public/icon.ico')
-    : join(process.resourcesPath, 'icon.ico')
+    : (process.platform === 'darwin' 
+        ? join(process.resourcesPath, 'icon.icns')
+        : join(process.resourcesPath, 'icon.ico'))
 
   // 根据系统主题设置窗口背景色
   const isDark = nativeTheme.shouldUseDarkColors
@@ -710,15 +735,12 @@ function createChatHistoryWindow(sessionId: string, messageId: number) {
       nodeIntegration: false
     },
     titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#00000000',
-      symbolColor: isDark ? '#ffffff' : '#1a1a1a',
-      height: 32
-    },
+    titleBarOverlay: false,
     show: false,
     backgroundColor: isDark ? '#1A1A1A' : '#F0F0F0',
     autoHideMenuBar: true
   })
+  setupCustomTitleBarWindow(win)
 
   win.once('ready-to-show', () => {
     win.show()
@@ -771,7 +793,9 @@ function createSessionChatWindow(sessionId: string, options?: OpenSessionChatWin
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   const iconPath = isDev
     ? join(__dirname, '../public/icon.ico')
-    : join(process.resourcesPath, 'icon.ico')
+    : (process.platform === 'darwin' 
+        ? join(process.resourcesPath, 'icon.icns')
+        : join(process.resourcesPath, 'icon.ico'))
 
   const isDark = nativeTheme.shouldUseDarkColors
 
@@ -964,6 +988,17 @@ function registerIpcHandlers() {
     }
   })
 
+  ipcMain.handle('log:clear', async () => {
+    try {
+      const logPath = join(app.getPath('userData'), 'logs', 'wcdb.log')
+      await mkdir(dirname(logPath), { recursive: true })
+      await writeFile(logPath, '', 'utf8')
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
+
   ipcMain.handle('diagnostics:getExportCardLogs', async (_, options?: { limit?: number }) => {
     return exportCardDiagnosticsService.snapshot(options?.limit)
   })
@@ -1101,6 +1136,11 @@ function registerIpcHandlers() {
     } else {
       win?.maximize()
     }
+  })
+
+  ipcMain.handle('window:isMaximized', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    return Boolean(win?.isMaximized() || win?.isFullScreen())
   })
 
   ipcMain.on('window:close', (event) => {
@@ -2002,7 +2042,6 @@ function registerIpcHandlers() {
           dbPath,
           decryptKey,
           wxid,
-          nativeTimeoutMs: 5000,
           onProgress: (progress) => {
             if (isYearsLoadCanceled(taskId)) return
             const snapshot = updateTaskSnapshot({

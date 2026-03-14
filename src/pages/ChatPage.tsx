@@ -356,18 +356,19 @@ const SessionItem = React.memo(function SessionItem({
   if (isFoldEntry) {
     return (
       <div
-        className={`session-item fold-entry`}
+        className={`session-item fold-entry ${isActive ? 'active' : ''}`}
         onClick={() => onSelect(session)}
       >
         <div className="fold-entry-avatar">
-          <FolderClosed size={22} />
+          <MessageSquare size={22} />
         </div>
         <div className="session-info">
           <div className="session-top">
-            <span className="session-name">折叠的群聊</span>
+            <span className="session-name">折叠的聊天</span>
+            <span className="session-time">{timeText}</span>
           </div>
           <div className="session-bottom">
-            <span className="session-summary">{session.summary || ''}</span>
+            <span className="session-summary">{session.summary || '暂无消息'}</span>
           </div>
         </div>
       </div>
@@ -2966,10 +2967,51 @@ function ChatPage(props: ChatPageProps) {
       setFilteredSessions([])
       return
     }
-    const visible = sessions.filter(s => {
+
+    // 检查是否有折叠的群聊
+    const foldedGroups = sessions.filter(s => s.isFolded && !s.username.toLowerCase().includes('placeholder_foldgroup'))
+    const hasFoldedGroups = foldedGroups.length > 0
+
+    let visible = sessions.filter(s => {
       if (s.isFolded && !s.username.toLowerCase().includes('placeholder_foldgroup')) return false
       return true
     })
+
+    // 如果有折叠的群聊，但列表中没有入口，则插入入口
+    if (hasFoldedGroups && !visible.some(s => s.username.toLowerCase().includes('placeholder_foldgroup'))) {
+      // 找到最新的折叠消息
+      const latestFolded = foldedGroups.reduce((latest, current) => {
+        const latestTime = latest.sortTimestamp || latest.lastTimestamp
+        const currentTime = current.sortTimestamp || current.lastTimestamp
+        return currentTime > latestTime ? current : latest
+      })
+
+      const foldEntry: ChatSession = {
+        username: 'placeholder_foldgroup',
+        displayName: '折叠的聊天',
+        summary: `${latestFolded.displayName || latestFolded.username}: ${latestFolded.summary}`,
+        type: 0,
+        sortTimestamp: latestFolded.sortTimestamp || latestFolded.lastTimestamp,
+        lastTimestamp: latestFolded.lastTimestamp || latestFolded.sortTimestamp,
+        lastMsgType: 0,
+        unreadCount: foldedGroups.reduce((sum, s) => sum + (s.unreadCount || 0), 0),
+        isMuted: false,
+        isFolded: false
+      }
+
+      // 按时间戳插入到正确位置
+      const foldTime = foldEntry.sortTimestamp || foldEntry.lastTimestamp
+      const insertIndex = visible.findIndex(s => {
+        const sTime = s.sortTimestamp || s.lastTimestamp
+        return sTime < foldTime
+      })
+      if (insertIndex === -1) {
+        visible.push(foldEntry)
+      } else {
+        visible.splice(insertIndex, 0, foldEntry)
+      }
+    }
+
     if (!searchKeyword.trim()) {
       setFilteredSessions(visible)
       return
@@ -3854,12 +3896,6 @@ function ChatPage(props: ChatPageProps) {
               <button className="icon-btn refresh-btn" onClick={handleRefresh} disabled={isLoadingSessions || isRefreshingSessions}>
                 <RefreshCw size={16} className={(isLoadingSessions || isRefreshingSessions) ? 'spin' : ''} />
               </button>
-              {isSessionListSyncing && (
-                <div className="session-sync-indicator">
-                  <Loader2 size={12} className="spin" />
-                  <span>同步中</span>
-                </div>
-              )}
             </div>
           </div>
           {/* 折叠群 header */}
@@ -5470,8 +5506,9 @@ function MessageBubble({
     let finalImagePath = imageLocalPath
     let finalLiveVideoPath = imageLiveVideoPath || undefined
 
-    // If current cache is a thumbnail, wait for a silent force-HD decrypt before opening viewer.
-    if (imageHasUpdate) {
+    // Every explicit preview click re-runs the forced HD search/decrypt path so
+    // users don't need to re-enter the session after WeChat materializes a new original image.
+    if (message.imageMd5 || message.imageDatName) {
       try {
         const upgraded = await requestImageDecrypt(true, true)
         if (upgraded?.success && upgraded.localPath) {
@@ -5503,7 +5540,6 @@ function MessageBubble({
 
     void window.electronAPI.window.openImageViewerWindow(finalImagePath, finalLiveVideoPath)
   }, [
-    imageHasUpdate,
     imageLiveVideoPath,
     imageLocalPath,
     imageCacheKey,

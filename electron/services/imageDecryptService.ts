@@ -414,23 +414,33 @@ export class ImageDecryptService {
     if (!skipResolvedCache) {
       if (imageMd5) {
         const cached = this.resolvedCache.get(imageMd5)
-        if (cached && existsSync(cached)) return cached
+        if (cached && existsSync(cached)) {
+          const preferred = this.getPreferredDatVariantPath(cached, allowThumbnail)
+          this.cacheDatPath(accountDir, imageMd5, preferred)
+          if (imageDatName) this.cacheDatPath(accountDir, imageDatName, preferred)
+          return preferred
+        }
       }
       if (imageDatName) {
         const cached = this.resolvedCache.get(imageDatName)
-        if (cached && existsSync(cached)) return cached
+        if (cached && existsSync(cached)) {
+          const preferred = this.getPreferredDatVariantPath(cached, allowThumbnail)
+          this.cacheDatPath(accountDir, imageDatName, preferred)
+          if (imageMd5) this.cacheDatPath(accountDir, imageMd5, preferred)
+          return preferred
+        }
       }
     }
 
     // 1. 通过 MD5 快速定位 (MsgAttach 目录)
     if (imageMd5) {
-      const res = await this.fastProbabilisticSearch(accountDir, imageMd5, allowThumbnail)
+      const res = await this.fastProbabilisticSearch(join(accountDir, 'msg', 'attach'), imageMd5, allowThumbnail)
       if (res) return res
     }
 
     // 2. 如果 imageDatName 看起来像 MD5，也尝试快速定位
     if (!imageMd5 && imageDatName && this.looksLikeMd5(imageDatName)) {
-      const res = await this.fastProbabilisticSearch(accountDir, imageDatName, allowThumbnail)
+      const res = await this.fastProbabilisticSearch(join(accountDir, 'msg', 'attach'), imageDatName, allowThumbnail)
       if (res) return res
     }
 
@@ -439,16 +449,17 @@ export class ImageDecryptService {
       this.logInfo('[ImageDecrypt] hardlink lookup (md5)', { imageMd5, sessionId })
       const hardlinkPath = await this.resolveHardlinkPath(accountDir, imageMd5, sessionId)
       if (hardlinkPath) {
-        const isThumb = this.isThumbnailPath(hardlinkPath)
+        const preferredPath = this.getPreferredDatVariantPath(hardlinkPath, allowThumbnail)
+        const isThumb = this.isThumbnailPath(preferredPath)
         if (allowThumbnail || !isThumb) {
-          this.logInfo('[ImageDecrypt] hardlink hit', { imageMd5, path: hardlinkPath })
-          this.cacheDatPath(accountDir, imageMd5, hardlinkPath)
-          if (imageDatName) this.cacheDatPath(accountDir, imageDatName, hardlinkPath)
-          return hardlinkPath
+          this.logInfo('[ImageDecrypt] hardlink hit', { imageMd5, path: preferredPath })
+          this.cacheDatPath(accountDir, imageMd5, preferredPath)
+          if (imageDatName) this.cacheDatPath(accountDir, imageDatName, preferredPath)
+          return preferredPath
         }
         // hardlink 找到的是缩略图，但要求高清图
         // 尝试在同一目录下查找高清图变体（快速查找，不遍历）
-        const hdPath = this.findHdVariantInSameDir(hardlinkPath)
+        const hdPath = this.findHdVariantInSameDir(preferredPath)
         if (hdPath) {
           this.cacheDatPath(accountDir, imageMd5, hdPath)
           if (imageDatName) this.cacheDatPath(accountDir, imageDatName, hdPath)
@@ -462,16 +473,19 @@ export class ImageDecryptService {
         this.logInfo('[ImageDecrypt] hardlink fallback (datName)', { imageDatName, sessionId })
         const fallbackPath = await this.resolveHardlinkPath(accountDir, imageDatName, sessionId)
         if (fallbackPath) {
-          const isThumb = this.isThumbnailPath(fallbackPath)
+          const preferredPath = this.getPreferredDatVariantPath(fallbackPath, allowThumbnail)
+          const isThumb = this.isThumbnailPath(preferredPath)
           if (allowThumbnail || !isThumb) {
-            this.logInfo('[ImageDecrypt] hardlink hit (datName)', { imageMd5: imageDatName, path: fallbackPath })
-            this.cacheDatPath(accountDir, imageDatName, fallbackPath)
-            return fallbackPath
+            this.logInfo('[ImageDecrypt] hardlink hit (datName)', { imageMd5: imageDatName, path: preferredPath })
+            this.cacheDatPath(accountDir, imageDatName, preferredPath)
+            if (imageMd5) this.cacheDatPath(accountDir, imageMd5, preferredPath)
+            return preferredPath
           }
           // 找到缩略图但要求高清图，尝试同目录查找高清图变体
-          const hdPath = this.findHdVariantInSameDir(fallbackPath)
+          const hdPath = this.findHdVariantInSameDir(preferredPath)
           if (hdPath) {
             this.cacheDatPath(accountDir, imageDatName, hdPath)
+            if (imageMd5) this.cacheDatPath(accountDir, imageMd5, hdPath)
             return hdPath
           }
           return null
@@ -484,14 +498,15 @@ export class ImageDecryptService {
       this.logInfo('[ImageDecrypt] hardlink lookup (datName)', { imageDatName, sessionId })
       const hardlinkPath = await this.resolveHardlinkPath(accountDir, imageDatName, sessionId)
       if (hardlinkPath) {
-        const isThumb = this.isThumbnailPath(hardlinkPath)
+        const preferredPath = this.getPreferredDatVariantPath(hardlinkPath, allowThumbnail)
+        const isThumb = this.isThumbnailPath(preferredPath)
         if (allowThumbnail || !isThumb) {
-          this.logInfo('[ImageDecrypt] hardlink hit', { imageMd5: imageDatName, path: hardlinkPath })
-          this.cacheDatPath(accountDir, imageDatName, hardlinkPath)
-          return hardlinkPath
+          this.logInfo('[ImageDecrypt] hardlink hit', { imageMd5: imageDatName, path: preferredPath })
+          this.cacheDatPath(accountDir, imageDatName, preferredPath)
+          return preferredPath
         }
         // hardlink 找到的是缩略图，但要求高清图
-        const hdPath = this.findHdVariantInSameDir(hardlinkPath)
+        const hdPath = this.findHdVariantInSameDir(preferredPath)
         if (hdPath) {
           this.cacheDatPath(accountDir, imageDatName, hdPath)
           return hdPath
@@ -510,9 +525,10 @@ export class ImageDecryptService {
     if (!skipResolvedCache) {
       const cached = this.resolvedCache.get(imageDatName)
       if (cached && existsSync(cached)) {
-        if (allowThumbnail || !this.isThumbnailPath(cached)) return cached
+        const preferred = this.getPreferredDatVariantPath(cached, allowThumbnail)
+        if (allowThumbnail || !this.isThumbnailPath(preferred)) return preferred
         // 缓存的是缩略图，尝试找高清图
-        const hdPath = this.findHdVariantInSameDir(cached)
+        const hdPath = this.findHdVariantInSameDir(preferred)
         if (hdPath) return hdPath
       }
     }
@@ -801,7 +817,8 @@ export class ImageDecryptService {
     const key = `${accountDir}|${datName}`
     const cached = this.resolvedCache.get(key)
     if (cached && existsSync(cached)) {
-      if (allowThumbnail || !this.isThumbnailPath(cached)) return cached
+      const preferred = this.getPreferredDatVariantPath(cached, allowThumbnail)
+      if (allowThumbnail || !this.isThumbnailPath(preferred)) return preferred
     }
 
     const root = join(accountDir, 'msg', 'attach')
@@ -810,7 +827,7 @@ export class ImageDecryptService {
     // 优化1：快速概率性查找
     // 包含：1. 基于文件名的前缀猜测 (旧版)
     //       2. 基于日期的最近月份扫描 (新版无索引时)
-    const fastHit = await this.fastProbabilisticSearch(root, datName)
+    const fastHit = await this.fastProbabilisticSearch(root, datName, allowThumbnail)
     if (fastHit) {
       this.resolvedCache.set(key, fastHit)
       return fastHit
@@ -830,33 +847,28 @@ export class ImageDecryptService {
    * 包含：1. 微信旧版结构 filename.substr(0, 2)/...
    *       2. 微信新版结构 msg/attach/{hash}/{YYYY-MM}/Img/filename
    */
-  private async fastProbabilisticSearch(root: string, datName: string, _allowThumbnail?: boolean): Promise<string | null> {
+  private async fastProbabilisticSearch(root: string, datName: string, allowThumbnail = true): Promise<string | null> {
     const { promises: fs } = require('fs')
     const { join } = require('path')
 
     try {
       // --- 策略 A: 旧版路径猜测 (msg/attach/xx/yy/...) ---
       const lowerName = datName.toLowerCase()
-      let baseName = lowerName
-      if (baseName.endsWith('.dat')) {
-        baseName = baseName.slice(0, -4)
-        if (baseName.endsWith('_t') || baseName.endsWith('.t') || baseName.endsWith('_hd')) {
-          baseName = baseName.slice(0, -3)
-        } else if (baseName.endsWith('_thumb')) {
-          baseName = baseName.slice(0, -6)
-        }
-      }
+      const baseName = this.normalizeDatBase(lowerName)
+      const targetNames = this.buildPreferredDatNames(baseName, allowThumbnail)
 
       const candidates: string[] = []
       if (/^[a-f0-9]{32}$/.test(baseName)) {
         const dir1 = baseName.substring(0, 2)
         const dir2 = baseName.substring(2, 4)
-        candidates.push(
-          join(root, dir1, dir2, datName),
-          join(root, dir1, dir2, 'Img', datName),
-          join(root, dir1, dir2, 'mg', datName),
-          join(root, dir1, dir2, 'Image', datName)
-        )
+        for (const targetName of targetNames) {
+          candidates.push(
+            join(root, dir1, dir2, targetName),
+            join(root, dir1, dir2, 'Img', targetName),
+            join(root, dir1, dir2, 'mg', targetName),
+            join(root, dir1, dir2, 'Image', targetName)
+          )
+        }
       }
 
       for (const path of candidates) {
@@ -881,13 +893,6 @@ export class ImageDecryptService {
           const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
           const mStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
           months.push(mStr)
-        }
-
-        const targetNames = [datName]
-        if (baseName !== lowerName) {
-          targetNames.push(`${baseName}.dat`)
-          targetNames.push(`${baseName}_t.dat`)
-          targetNames.push(`${baseName}_thumb.dat`)
         }
 
         const batchSize = 20
@@ -919,36 +924,13 @@ export class ImageDecryptService {
 
   /**
    * 在同一目录下查找高清图变体
-   * 缩略图 xxx_t.dat -> 高清图 xxx_h.dat 或 xxx.dat
+   * 优先 `_h`，再回退其他非缩略图变体
    */
   private findHdVariantInSameDir(thumbPath: string): string | null {
     try {
       const dir = dirname(thumbPath)
-      const fileName = basename(thumbPath).toLowerCase()
-
-      // 提取基础名称（去掉 _t.dat 或 .t.dat）
-      let baseName = fileName
-      if (baseName.endsWith('_t.dat')) {
-        baseName = baseName.slice(0, -6)
-      } else if (baseName.endsWith('.t.dat')) {
-        baseName = baseName.slice(0, -6)
-      } else {
-        return null
-      }
-
-      // 尝试查找高清图变体
-      const variants = [
-        `${baseName}_h.dat`,
-        `${baseName}.h.dat`,
-        `${baseName}.dat`
-      ]
-
-      for (const variant of variants) {
-        const variantPath = join(dir, variant)
-        if (existsSync(variantPath)) {
-          return variantPath
-        }
-      }
+      const fileName = basename(thumbPath)
+      return this.findPreferredDatVariantInDir(dir, fileName, false)
     } catch { }
     return null
   }
@@ -998,7 +980,86 @@ export class ImageDecryptService {
         void worker.terminate()
         resolve(null)
       })
-    })
+      })
+  }
+
+  private stripDatVariantSuffix(base: string): string {
+    const lower = base.toLowerCase()
+    const suffixes = ['_thumb', '.thumb', '_hd', '.hd', '_h', '.h', '_t', '.t', '_c', '.c']
+    for (const suffix of suffixes) {
+      if (lower.endsWith(suffix)) {
+        return lower.slice(0, -suffix.length)
+      }
+    }
+    if (/[._][a-z]$/.test(lower)) {
+      return lower.slice(0, -2)
+    }
+    return lower
+  }
+
+  private getDatVariantPriority(name: string): number {
+    const lower = name.toLowerCase()
+    const baseLower = lower.endsWith('.dat') || lower.endsWith('.jpg') ? lower.slice(0, -4) : lower
+    if (baseLower.endsWith('_h') || baseLower.endsWith('.h')) return 600
+    if (!this.hasXVariant(baseLower)) return 500
+    if (baseLower.endsWith('_hd') || baseLower.endsWith('.hd')) return 450
+    if (baseLower.endsWith('_c') || baseLower.endsWith('.c')) return 400
+    if (this.isThumbnailDat(lower)) return 100
+    return 350
+  }
+
+  private buildPreferredDatNames(baseName: string, allowThumbnail: boolean): string[] {
+    if (!baseName) return []
+    const names = [
+      `${baseName}_h.dat`,
+      `${baseName}.h.dat`,
+      `${baseName}.dat`,
+      `${baseName}_hd.dat`,
+      `${baseName}.hd.dat`,
+      `${baseName}_c.dat`,
+      `${baseName}.c.dat`
+    ]
+    if (allowThumbnail) {
+      names.push(
+        `${baseName}_thumb.dat`,
+        `${baseName}.thumb.dat`,
+        `${baseName}_t.dat`,
+        `${baseName}.t.dat`
+      )
+    }
+    return Array.from(new Set(names))
+  }
+
+  private findPreferredDatVariantInDir(dirPath: string, baseName: string, allowThumbnail: boolean): string | null {
+    let entries: string[]
+    try {
+      entries = readdirSync(dirPath)
+    } catch {
+      return null
+    }
+    const target = this.normalizeDatBase(baseName.toLowerCase())
+    let bestPath: string | null = null
+    let bestScore = Number.NEGATIVE_INFINITY
+    for (const entry of entries) {
+      const lower = entry.toLowerCase()
+      if (!lower.endsWith('.dat')) continue
+      if (!allowThumbnail && this.isThumbnailDat(lower)) continue
+      const baseLower = lower.slice(0, -4)
+      if (this.normalizeDatBase(baseLower) !== target) continue
+      const score = this.getDatVariantPriority(lower)
+      if (score > bestScore) {
+        bestScore = score
+        bestPath = join(dirPath, entry)
+      }
+    }
+    return bestPath
+  }
+
+  private getPreferredDatVariantPath(datPath: string, allowThumbnail: boolean): string {
+    const lower = datPath.toLowerCase()
+    if (!lower.endsWith('.dat')) return datPath
+    const preferred = this.findPreferredDatVariantInDir(dirname(datPath), basename(datPath), allowThumbnail)
+    return preferred || datPath
   }
 
   private normalizeDatBase(name: string): string {
@@ -1006,18 +1067,21 @@ export class ImageDecryptService {
     if (base.endsWith('.dat') || base.endsWith('.jpg')) {
       base = base.slice(0, -4)
     }
-    while (/[._][a-z]$/.test(base)) {
-      base = base.slice(0, -2)
+    for (;;) {
+      const stripped = this.stripDatVariantSuffix(base)
+      if (stripped === base) {
+        return base
+      }
+      base = stripped
     }
-    return base
   }
 
   private hasImageVariantSuffix(baseLower: string): boolean {
-    return /[._][a-z]$/.test(baseLower)
+    return this.stripDatVariantSuffix(baseLower) !== baseLower
   }
 
   private isLikelyImageDatBase(baseLower: string): boolean {
-    return this.hasImageVariantSuffix(baseLower) || this.looksLikeMd5(baseLower)
+    return this.hasImageVariantSuffix(baseLower) || this.looksLikeMd5(this.normalizeDatBase(baseLower))
   }
 
 
@@ -1206,24 +1270,7 @@ export class ImageDecryptService {
   }
 
   private findNonThumbnailVariantInDir(dirPath: string, baseName: string): string | null {
-    let entries: string[]
-    try {
-      entries = readdirSync(dirPath)
-    } catch {
-      return null
-    }
-    const target = this.normalizeDatBase(baseName.toLowerCase())
-    for (const entry of entries) {
-      const lower = entry.toLowerCase()
-      if (!lower.endsWith('.dat')) continue
-      if (this.isThumbnailDat(lower)) continue
-      const baseLower = lower.slice(0, -4)
-      // 只排除没有 _x 变体后缀的文件（允许 _hd、_h 等所有带变体的）
-      if (!this.hasXVariant(baseLower)) continue
-      if (this.normalizeDatBase(baseLower) !== target) continue
-      return join(dirPath, entry)
-    }
-    return null
+    return this.findPreferredDatVariantInDir(dirPath, baseName, false)
   }
 
   private isNonThumbnailVariantDat(datPath: string): boolean {
@@ -1231,8 +1278,7 @@ export class ImageDecryptService {
     if (!lower.endsWith('.dat')) return false
     if (this.isThumbnailDat(lower)) return false
     const baseLower = lower.slice(0, -4)
-    // 只检查是否有 _x 变体后缀（允许 _hd、_h 等所有带变体的）
-    return this.hasXVariant(baseLower)
+    return this.isLikelyImageDatBase(baseLower)
   }
 
   private emitImageUpdate(payload: { sessionId?: string; imageMd5?: string; imageDatName?: string }, cacheKey: string): void {
@@ -1858,7 +1904,7 @@ export class ImageDecryptService {
 
   private hasXVariant(base: string): boolean {
     const lower = base.toLowerCase()
-    return lower.endsWith('_h') || lower.endsWith('_hd') || lower.endsWith('_thumb') || lower.endsWith('_t')
+    return this.stripDatVariantSuffix(lower) !== lower
   }
 
   private isHdPath(p: string): boolean {

@@ -11,6 +11,8 @@ export interface ElectronAPI {
   window: {
     minimize: () => void
     maximize: () => void
+    isMaximized: () => Promise<boolean>
+    onMaximizeStateChanged: (callback: (isMaximized: boolean) => void) => () => void
     close: () => void
     openAgreementWindow: () => Promise<boolean>
     completeOnboarding: () => Promise<boolean>
@@ -67,6 +69,7 @@ export interface ElectronAPI {
   log: {
     getPath: () => Promise<string>
     read: () => Promise<{ success: boolean; content?: string; error?: string }>
+    clear: () => Promise<{ success: boolean; error?: string }>
     debug: (data: any) => void
   }
   diagnostics: {

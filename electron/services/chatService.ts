@@ -359,8 +359,9 @@ class ChatService {
     // 这种方式更高效，且不占用 JS 线程，并能直接监听 session/message 目录变更
     wcdbService.setMonitor((type, json) => {
       this.handleSessionStatsMonitorChange(type, json)
+      const windows = BrowserWindow.getAllWindows()
       // 广播给所有渲染进程窗口
-      BrowserWindow.getAllWindows().forEach((win) => {
+      windows.forEach((win) => {
         if (!win.isDestroyed()) {
           win.webContents.send('wcdb-change', { type, json })
         }
@@ -2974,7 +2975,9 @@ class ChatService {
       const localType = this.getRowInt(row, ['local_type', 'localType', 'type', 'msg_type', 'msgType', 'WCDB_CT_local_type'], 1)
       const isSendRaw = this.getRowField(row, ['computed_is_send', 'computedIsSend', 'is_send', 'isSend', 'WCDB_CT_is_send'])
       let isSend = isSendRaw === null ? null : parseInt(isSendRaw, 10)
-      const senderUsername = this.getRowField(row, ['sender_username', 'senderUsername', 'sender', 'WCDB_CT_sender_username']) || null
+      const senderUsername = this.getRowField(row, ['sender_username', 'senderUsername', 'sender', 'WCDB_CT_sender_username'])
+        || this.extractSenderUsernameFromContent(content)
+        || null
       const createTime = this.getRowInt(row, ['create_time', 'createTime', 'createtime', 'msg_create_time', 'msgCreateTime', 'msg_time', 'msgTime', 'time', 'WCDB_CT_create_time'], 0)
 
       if (senderUsername && (myWxidLower || cleanedWxidLower)) {
@@ -4385,7 +4388,18 @@ class ChatService {
   }
 
   private stripSenderPrefix(content: string): string {
-    return content.replace(/^[\s]*([a-zA-Z0-9_-]+):(?!\/\/)\s*/, '')
+    return content.replace(/^[\s]*([a-zA-Z0-9_@-]+):(?!\/\/)(?:\s*(?:\r?\n|<br\s*\/?>)\s*|\s*)/i, '')
+  }
+
+  private extractSenderUsernameFromContent(content: string): string | null {
+    if (!content) return null
+
+    const normalized = this.cleanUtf16(this.decodeHtmlEntities(String(content)))
+    const match = /^\s*([a-zA-Z0-9_@-]{4,}):(?!\/\/)\s*(?:\r?\n|<br\s*\/?>)/i.exec(normalized)
+    if (!match?.[1]) return null
+
+    const candidate = match[1].trim()
+    return candidate || null
   }
 
   private decodeHtmlEntities(content: string): string {
@@ -6594,7 +6608,9 @@ class ChatService {
       createTime: this.getRowInt(row, ['create_time', 'createTime', 'createtime', 'msg_create_time', 'msgCreateTime', 'msg_time', 'msgTime', 'time', 'WCDB_CT_create_time'], 0),
       sortSeq: this.getRowInt(row, ['sort_seq', 'sortSeq', 'seq', 'sequence', 'WCDB_CT_sort_seq'], this.getRowInt(row, ['create_time', 'createTime', 'createtime', 'msg_create_time', 'msgCreateTime', 'msg_time', 'msgTime', 'time', 'WCDB_CT_create_time'], 0)),
       isSend: this.getRowInt(row, ['computed_is_send', 'computedIsSend', 'is_send', 'isSend', 'WCDB_CT_is_send'], 0),
-      senderUsername: this.getRowField(row, ['sender_username', 'senderUsername', 'sender', 'WCDB_CT_sender_username']) || null,
+      senderUsername: this.getRowField(row, ['sender_username', 'senderUsername', 'sender', 'WCDB_CT_sender_username'])
+        || this.extractSenderUsernameFromContent(rawContent)
+        || null,
       rawContent: rawContent,
       content: rawContent,  // 添加原始内容供视频MD5解析使用
       parsedContent: this.parseMessageContent(rawContent, this.getRowInt(row, ['local_type', 'localType', 'type', 'msg_type', 'msgType', 'WCDB_CT_local_type'], 0))
