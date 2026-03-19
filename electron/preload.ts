@@ -113,6 +113,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('window:openImageViewerWindow', imagePath, liveVideoPath),
     openChatHistoryWindow: (sessionId: string, messageId: number) =>
       ipcRenderer.invoke('window:openChatHistoryWindow', sessionId, messageId),
+    openChatHistoryPayloadWindow: (payload: { sessionId: string; title?: string; recordList: any[] }) =>
+      ipcRenderer.invoke('window:openChatHistoryPayloadWindow', payload),
+    getChatHistoryPayload: (payloadId: string) =>
+      ipcRenderer.invoke('window:getChatHistoryPayload', payloadId),
     openSessionChatWindow: (
       sessionId: string,
       options?: {

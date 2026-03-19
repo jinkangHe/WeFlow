@@ -1,4 +1,4 @@
-import type { ChatSession, Message, Contact, ContactInfo } from './models'
+import type { ChatSession, Message, Contact, ContactInfo, ChatRecordItem } from './models'
 
 export interface SessionChatWindowOpenOptions {
   source?: 'chat' | 'export'
@@ -24,6 +24,8 @@ export interface ElectronAPI {
     resizeToFitVideo: (videoWidth: number, videoHeight: number) => Promise<void>
     openImageViewerWindow: (imagePath: string, liveVideoPath?: string) => Promise<void>
     openChatHistoryWindow: (sessionId: string, messageId: number) => Promise<boolean>
+    openChatHistoryPayloadWindow: (payload: { sessionId: string; title?: string; recordList: ChatRecordItem[] }) => Promise<boolean>
+    getChatHistoryPayload: (payloadId: string) => Promise<{ success: boolean; payload?: { sessionId: string; title?: string; recordList: ChatRecordItem[] }; error?: string }>
     openSessionChatWindow: (sessionId: string, options?: SessionChatWindowOpenOptions) => Promise<boolean>
   }
   config: {

@@ -7,7 +7,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../stores/chatStore'
 import { useBatchTranscribeStore, type BatchVoiceTaskType } from '../stores/batchTranscribeStore'
 import { useBatchImageDecryptStore } from '../stores/batchImageDecryptStore'
-import type { ChatSession, Message } from '../types/models'
+import type { ChatRecordItem, ChatSession, Message } from '../types/models'
 import { getEmojiPath } from 'wechat-emojis'
 import { VoiceTranscribeDialog } from '../components/VoiceTranscribeDialog'
 import { LivePhotoIcon } from '../components/LivePhotoIcon'
@@ -112,6 +112,44 @@ function flattenGlobalMsgSearchSessionMap(map: Map<string, GlobalMsgSearchResult
     if (list.length > 0) all.push(...list)
   }
   return sortMessagesByCreateTimeDesc(all)
+}
+
+function normalizeChatRecordText(value?: string): string {
+  return String(value || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function hasRenderableChatRecordName(value?: string): boolean {
+  return value !== undefined && value !== null && String(value).length > 0
+}
+
+function getChatRecordPreviewText(item: ChatRecordItem): string {
+  const text = normalizeChatRecordText(item.datadesc) || normalizeChatRecordText(item.datatitle)
+  if (item.datatype === 17) {
+    return normalizeChatRecordText(item.chatRecordTitle) || normalizeChatRecordText(item.datatitle) || '聊天记录'
+  }
+  if (item.datatype === 2 || item.datatype === 3) return '[媒体消息]'
+  if (item.datatype === 43) return '[视频]'
+  if (item.datatype === 34) return '[语音]'
+  if (item.datatype === 47) return '[表情]'
+  return text || '[媒体消息]'
+}
+
+function buildChatRecordPreviewItems(recordList: ChatRecordItem[], maxVisible = 3): ChatRecordItem[] {
+  if (recordList.length <= maxVisible) return recordList.slice(0, maxVisible)
+  const firstNestedIndex = recordList.findIndex(item => item.datatype === 17)
+  if (firstNestedIndex < 0 || firstNestedIndex < maxVisible) {
+    return recordList.slice(0, maxVisible)
+  }
+  if (maxVisible <= 1) {
+    return [recordList[firstNestedIndex]]
+  }
+  return [
+    ...recordList.slice(0, maxVisible - 1),
+    recordList[firstNestedIndex]
+  ]
 }
 
 function composeGlobalMsgSearchResults(
@@ -9000,11 +9038,12 @@ function MessageBubble({
             ? `共 ${recordList.length} 条聊天记录`
             : desc || '聊天记录'
 
-        const previewItems = recordList.slice(0, 4)
+        const previewItems = buildChatRecordPreviewItems(recordList, 3)
+        const remainingCount = Math.max(0, recordList.length - previewItems.length)
 
         return (
           <div
-            className="link-message chat-record-message"
+            className="chat-record-message"
             onClick={(e) => {
               e.stopPropagation()
               // 打开聊天记录窗口
@@ -9012,42 +9051,32 @@ function MessageBubble({
             }}
             title="点击查看详细聊天记录"
           >
-            <div className="link-header">
-              <div className="link-title" title={displayTitle}>
-                {displayTitle}
-              </div>
+            <div className="chat-record-title" title={displayTitle}>
+              {displayTitle}
             </div>
-            <div className="link-body">
-              <div className="chat-record-preview">
-                {previewItems.length > 0 ? (
-                  <>
-                    <div className="chat-record-meta-line" title={metaText}>
-                      {metaText}
-                    </div>
-                    <div className="chat-record-list">
-                      {previewItems.map((item, i) => (
-                        <div key={i} className="chat-record-item">
-                          <span className="source-name">
-                            {item.sourcename ? `${item.sourcename}: ` : ''}
-                          </span>
-                          {item.datadesc || item.datatitle || '[媒体消息]'}
-                        </div>
-                      ))}
-                      {recordList.length > previewItems.length && (
-                        <div className="chat-record-more">还有 {recordList.length - previewItems.length} 条…</div>
-                      )}
-                    </div>
-                  </>
-                ) : (
-                  <div className="chat-record-desc">
-                    {desc || '点击打开查看完整聊天记录'}
+            <div className="chat-record-meta-line" title={metaText}>
+              {metaText}
+            </div>
+            {previewItems.length > 0 ? (
+              <div className="chat-record-list">
+                {previewItems.map((item, i) => (
+                  <div key={i} className="chat-record-item">
+                    <span className="source-name">
+                      {hasRenderableChatRecordName(item.sourcename) ? `${item.sourcename}: ` : ''}
+                    </span>
+                    {getChatRecordPreviewText(item)}
                   </div>
+                ))}
+                {remainingCount > 0 && (
+                  <div className="chat-record-more">还有 {remainingCount} 条…</div>
                 )}
               </div>
-              <div className="chat-record-icon">
-                <MessageSquare size={18} />
+            ) : (
+              <div className="chat-record-desc">
+                {desc || '点击打开查看完整聊天记录'}
               </div>
-            </div>
+            )}
+            <div className="chat-record-footer">聊天记录</div>
           </div>
         )
       }

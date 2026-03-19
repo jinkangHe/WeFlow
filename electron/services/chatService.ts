@@ -114,8 +114,28 @@ export interface Message {
     datatype: number
     sourcename: string
     sourcetime: string
-    datadesc: string
+    sourceheadurl?: string
+    datadesc?: string
     datatitle?: string
+    fileext?: string
+    datasize?: number
+    messageuuid?: string
+    dataurl?: string
+    datathumburl?: string
+    datacdnurl?: string
+    cdndatakey?: string
+    cdnthumbkey?: string
+    aeskey?: string
+    md5?: string
+    fullmd5?: string
+    thumbfullmd5?: string
+    srcMsgLocalid?: number
+    imgheight?: number
+    imgwidth?: number
+    duration?: number
+    chatRecordTitle?: string
+    chatRecordDesc?: string
+    chatRecordList?: any[]
   }>
   _db_path?: string // 内部字段：记录消息所属数据库路径
 }
@@ -3120,8 +3140,28 @@ class ChatService {
         datatype: number
         sourcename: string
         sourcetime: string
-        datadesc: string
+        sourceheadurl?: string
+        datadesc?: string
         datatitle?: string
+        fileext?: string
+        datasize?: number
+        messageuuid?: string
+        dataurl?: string
+        datathumburl?: string
+        datacdnurl?: string
+        cdndatakey?: string
+        cdnthumbkey?: string
+        aeskey?: string
+        md5?: string
+        fullmd5?: string
+        thumbfullmd5?: string
+        srcMsgLocalid?: number
+        imgheight?: number
+        imgwidth?: number
+        duration?: number
+        chatRecordTitle?: string
+        chatRecordDesc?: string
+        chatRecordList?: any[]
       }> | undefined
 
       if (localType === 47 && content) {
@@ -3873,8 +3913,28 @@ class ChatService {
       datatype: number
       sourcename: string
       sourcetime: string
-      datadesc: string
+      sourceheadurl?: string
+      datadesc?: string
       datatitle?: string
+      fileext?: string
+      datasize?: number
+      messageuuid?: string
+      dataurl?: string
+      datathumburl?: string
+      datacdnurl?: string
+      cdndatakey?: string
+      cdnthumbkey?: string
+      aeskey?: string
+      md5?: string
+      fullmd5?: string
+      thumbfullmd5?: string
+      srcMsgLocalid?: number
+      imgheight?: number
+      imgwidth?: number
+      duration?: number
+      chatRecordTitle?: string
+      chatRecordDesc?: string
+      chatRecordList?: any[]
     }>
   } {
     try {
@@ -4057,41 +4117,8 @@ class ChatService {
         case '19': {
           // 聊天记录
           result.chatRecordTitle = title || '聊天记录'
-
-          // 解析聊天记录列表
-          const recordList: Array<{
-            datatype: number
-            sourcename: string
-            sourcetime: string
-            datadesc: string
-            datatitle?: string
-          }> = []
-
-          // 查找所有 <recorditem> 标签
-          const recordItemRegex = /<recorditem>([\s\S]*?)<\/recorditem>/gi
-          let match: RegExpExecArray | null
-
-          while ((match = recordItemRegex.exec(content)) !== null) {
-            const itemXml = match[1]
-
-            const datatypeStr = this.extractXmlValue(itemXml, 'datatype')
-            const sourcename = this.extractXmlValue(itemXml, 'sourcename')
-            const sourcetime = this.extractXmlValue(itemXml, 'sourcetime')
-            const datadesc = this.extractXmlValue(itemXml, 'datadesc')
-            const datatitle = this.extractXmlValue(itemXml, 'datatitle')
-
-            if (sourcename && datadesc) {
-              recordList.push({
-                datatype: datatypeStr ? parseInt(datatypeStr, 10) : 0,
-                sourcename,
-                sourcetime: sourcetime || '',
-                datadesc,
-                datatitle: datatitle || undefined
-              })
-            }
-          }
-
-          if (recordList.length > 0) {
+          const recordList = this.parseForwardChatRecordList(content)
+          if (recordList && recordList.length > 0) {
             result.chatRecordList = recordList
           }
           break
@@ -4155,6 +4182,224 @@ class ChatService {
     } catch (e) {
       console.error('[ChatService] Type 49 消息解析失败:', e)
       return {}
+    }
+  }
+
+  private parseForwardChatRecordList(content: string): any[] | undefined {
+    const normalized = this.decodeHtmlEntities(content || '')
+    if (!normalized.includes('<recorditem') && !normalized.includes('<dataitem')) {
+      return undefined
+    }
+
+    const items: any[] = []
+    const dedupe = new Set<string>()
+    const recordItemRegex = /<recorditem>([\s\S]*?)<\/recorditem>/gi
+    let recordItemMatch: RegExpExecArray | null
+    while ((recordItemMatch = recordItemRegex.exec(normalized)) !== null) {
+      const parsed = this.parseForwardChatRecordContainer(recordItemMatch[1] || '')
+      for (const item of parsed) {
+        const key = `${item.datatype}|${item.sourcename}|${item.sourcetime}|${item.datadesc || ''}|${item.datatitle || ''}|${item.messageuuid || ''}`
+        if (!dedupe.has(key)) {
+          dedupe.add(key)
+          items.push(item)
+        }
+      }
+    }
+
+    if (items.length === 0 && normalized.includes('<dataitem')) {
+      const parsed = this.parseForwardChatRecordContainer(normalized)
+      for (const item of parsed) {
+        const key = `${item.datatype}|${item.sourcename}|${item.sourcetime}|${item.datadesc || ''}|${item.datatitle || ''}|${item.messageuuid || ''}`
+        if (!dedupe.has(key)) {
+          dedupe.add(key)
+          items.push(item)
+        }
+      }
+    }
+
+    return items.length > 0 ? items : undefined
+  }
+
+  private extractTopLevelXmlElements(source: string, tagName: string): Array<{ attrs: string; inner: string }> {
+    const xml = source || ''
+    if (!xml) return []
+
+    const pattern = new RegExp(`<(/?)${tagName}\\b([^>]*)>`, 'gi')
+    const result: Array<{ attrs: string; inner: string }> = []
+    let match: RegExpExecArray | null
+    let depth = 0
+    let openEnd = -1
+    let openStart = -1
+    let openAttrs = ''
+
+    while ((match = pattern.exec(xml)) !== null) {
+      const isClosing = match[1] === '/'
+      const attrs = match[2] || ''
+      const rawTag = match[0] || ''
+      const selfClosing = !isClosing && /\/\s*>$/.test(rawTag)
+
+      if (!isClosing) {
+        if (depth === 0) {
+          openStart = match.index
+          openEnd = pattern.lastIndex
+          openAttrs = attrs
+        }
+        if (!selfClosing) {
+          depth += 1
+        } else if (depth === 0 && openEnd >= 0) {
+          result.push({ attrs: openAttrs, inner: '' })
+          openStart = -1
+          openEnd = -1
+          openAttrs = ''
+        }
+        continue
+      }
+
+      if (depth <= 0) continue
+      depth -= 1
+      if (depth === 0 && openEnd >= 0 && openStart >= 0) {
+        result.push({
+          attrs: openAttrs,
+          inner: xml.slice(openEnd, match.index)
+        })
+        openStart = -1
+        openEnd = -1
+        openAttrs = ''
+      }
+    }
+
+    return result
+  }
+
+  private parseForwardChatRecordContainer(containerXml: string): any[] {
+    const source = containerXml || ''
+    if (!source) return []
+
+    const segments: string[] = [source]
+    const decodedContainer = this.decodeHtmlEntities(source)
+    if (decodedContainer !== source) {
+      segments.push(decodedContainer)
+    }
+
+    const cdataRegex = /<!\[CDATA\[([\s\S]*?)\]\]>/g
+    let cdataMatch: RegExpExecArray | null
+    while ((cdataMatch = cdataRegex.exec(source)) !== null) {
+      const cdataInner = cdataMatch[1] || ''
+      if (!cdataInner) continue
+      segments.push(cdataInner)
+      const decodedInner = this.decodeHtmlEntities(cdataInner)
+      if (decodedInner !== cdataInner) {
+        segments.push(decodedInner)
+      }
+    }
+
+    const items: any[] = []
+    const seen = new Set<string>()
+    for (const segment of segments) {
+      if (!segment) continue
+      const dataItems = this.extractTopLevelXmlElements(segment, 'dataitem')
+      for (const dataItem of dataItems) {
+        const parsed = this.parseForwardChatRecordDataItem(dataItem.inner || '', dataItem.attrs || '')
+        if (!parsed) continue
+        const key = `${parsed.datatype}|${parsed.sourcename}|${parsed.sourcetime}|${parsed.datadesc || ''}|${parsed.datatitle || ''}|${parsed.messageuuid || ''}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          items.push(parsed)
+        }
+      }
+    }
+
+    if (items.length > 0) return items
+    const fallback = this.parseForwardChatRecordDataItem(source, '')
+    return fallback ? [fallback] : []
+  }
+
+  private parseForwardChatRecordDataItem(itemXml: string, attrs: string): any | null {
+    const datatypeMatch = /datatype\s*=\s*["']?(\d+)["']?/i.exec(attrs || '')
+    const datatype = datatypeMatch ? parseInt(datatypeMatch[1], 10) : parseInt(this.extractXmlValue(itemXml, 'datatype') || '0', 10)
+    const sourcename = this.decodeHtmlEntities(this.extractXmlValue(itemXml, 'sourcename') || '')
+    const sourcetime = this.extractXmlValue(itemXml, 'sourcetime') || ''
+    const sourceheadurl = this.extractXmlValue(itemXml, 'sourceheadurl') || undefined
+    const datadesc = this.decodeHtmlEntities(
+      this.extractXmlValue(itemXml, 'datadesc') ||
+      this.extractXmlValue(itemXml, 'content') ||
+      ''
+    ) || undefined
+    const datatitle = this.decodeHtmlEntities(this.extractXmlValue(itemXml, 'datatitle') || '') || undefined
+    const fileext = this.extractXmlValue(itemXml, 'fileext') || undefined
+    const datasize = parseInt(this.extractXmlValue(itemXml, 'datasize') || '0', 10) || undefined
+    const messageuuid = this.extractXmlValue(itemXml, 'messageuuid') || undefined
+    const dataurl = this.decodeHtmlEntities(this.extractXmlValue(itemXml, 'dataurl') || '') || undefined
+    const datathumburl = this.decodeHtmlEntities(
+      this.extractXmlValue(itemXml, 'datathumburl') ||
+      this.extractXmlValue(itemXml, 'thumburl') ||
+      this.extractXmlValue(itemXml, 'cdnthumburl') ||
+      ''
+    ) || undefined
+    const datacdnurl = this.decodeHtmlEntities(
+      this.extractXmlValue(itemXml, 'datacdnurl') ||
+      this.extractXmlValue(itemXml, 'cdnurl') ||
+      this.extractXmlValue(itemXml, 'cdndataurl') ||
+      ''
+    ) || undefined
+    const cdndatakey = this.extractXmlValue(itemXml, 'cdndatakey') || undefined
+    const cdnthumbkey = this.extractXmlValue(itemXml, 'cdnthumbkey') || undefined
+    const aeskey = this.decodeHtmlEntities(
+      this.extractXmlValue(itemXml, 'aeskey') ||
+      this.extractXmlValue(itemXml, 'qaeskey') ||
+      ''
+    ) || undefined
+    const md5 = this.extractXmlValue(itemXml, 'md5') || this.extractXmlValue(itemXml, 'datamd5') || undefined
+    const fullmd5 = this.extractXmlValue(itemXml, 'fullmd5') || undefined
+    const thumbfullmd5 = this.extractXmlValue(itemXml, 'thumbfullmd5') || undefined
+    const srcMsgLocalid = parseInt(this.extractXmlValue(itemXml, 'srcMsgLocalid') || '0', 10) || undefined
+    const imgheight = parseInt(this.extractXmlValue(itemXml, 'imgheight') || '0', 10) || undefined
+    const imgwidth = parseInt(this.extractXmlValue(itemXml, 'imgwidth') || '0', 10) || undefined
+    const duration = parseInt(this.extractXmlValue(itemXml, 'duration') || '0', 10) || undefined
+    const nestedRecordXml = this.extractXmlValue(itemXml, 'recordxml') || undefined
+    const chatRecordTitle = this.decodeHtmlEntities(
+      (nestedRecordXml && this.extractXmlValue(nestedRecordXml, 'title')) ||
+      datatitle ||
+      ''
+    ) || undefined
+    const chatRecordDesc = this.decodeHtmlEntities(
+      (nestedRecordXml && this.extractXmlValue(nestedRecordXml, 'desc')) ||
+      datadesc ||
+      ''
+    ) || undefined
+    const chatRecordList =
+      datatype === 17 && nestedRecordXml
+        ? this.parseForwardChatRecordContainer(nestedRecordXml)
+        : undefined
+
+    if (!(datatype || sourcename || datadesc || datatitle || messageuuid || srcMsgLocalid)) return null
+
+    return {
+      datatype: Number.isFinite(datatype) ? datatype : 0,
+      sourcename,
+      sourcetime,
+      sourceheadurl,
+      datadesc,
+      datatitle,
+      fileext,
+      datasize,
+      messageuuid,
+      dataurl,
+      datathumburl,
+      datacdnurl,
+      cdndatakey,
+      cdnthumbkey,
+      aeskey,
+      md5,
+      fullmd5,
+      thumbfullmd5,
+      srcMsgLocalid,
+      imgheight,
+      imgwidth,
+      duration,
+      chatRecordTitle,
+      chatRecordDesc,
+      chatRecordList
     }
   }
 

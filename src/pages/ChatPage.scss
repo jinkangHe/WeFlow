@@ -3307,13 +3307,89 @@
 
 // 聊天记录消息 (合并转发)
 .chat-record-message {
-  background: var(--card-inner-bg) !important;
-  border: 1px solid var(--border-color) !important;
-  transition: opacity 0.2s ease;
+  width: 300px;
+  min-width: 240px;
+  max-width: 336px;
+  background: color-mix(in srgb, var(--bg-secondary) 97%, #f5f7fb);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
   cursor: pointer;
+  padding: 0;
 
   &:hover {
-    opacity: 0.85;
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+    border-color: color-mix(in srgb, var(--primary) 28%, var(--border-color));
+  }
+
+  .chat-record-title {
+    padding: 13px 16px 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.45;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .chat-record-meta-line {
+    padding: 0 16px 10px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .chat-record-list {
+    padding: 0 16px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 92px;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .chat-record-item {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .source-name {
+    color: currentColor;
+    opacity: 0.92;
+    font-weight: 500;
+    margin-right: 4px;
+  }
+
+  .chat-record-more {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .chat-record-desc {
+    padding: 0 16px 11px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .chat-record-footer {
+    padding: 8px 16px 10px;
+    font-size: 11px;
+    color: var(--text-tertiary);
   }
 }
 
@@ -3384,75 +3460,6 @@
 
   .file-meta {
     color: #999;
-  }
-}
-
-// 聊天记录消息 - 复用 link-message 基础样式
-.chat-record-message {
-  cursor: pointer;
-
-  .link-header {
-    padding-bottom: 4px;
-  }
-
-  .chat-record-preview {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .chat-record-meta-line {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .chat-record-list {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    max-height: 70px;
-    overflow: hidden;
-  }
-
-  .chat-record-item {
-    font-size: 12px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .source-name {
-    color: var(--text-primary);
-    font-weight: 500;
-    margin-right: 4px;
-  }
-
-  .chat-record-more {
-    font-size: 12px;
-    color: var(--primary);
-  }
-
-  .chat-record-desc {
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-
-  .chat-record-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 10px;
-    background: var(--primary-gradient);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #fff;
-    flex-shrink: 0;
   }
 }
 
@@ -3552,23 +3559,18 @@
 .message-bubble.sent {
 
   .card-message,
-  .chat-record-message,
   .miniapp-message,
   .appmsg-rich-card {
     background: var(--sent-card-bg);
 
     .card-name,
     .miniapp-title,
-    .source-name,
     .link-title {
       color: white;
     }
 
     .card-label,
     .miniapp-label,
-    .chat-record-item,
-    .chat-record-meta-line,
-    .chat-record-desc,
     .link-desc,
     .appmsg-url-line {
       color: rgba(255, 255, 255, 0.8);
@@ -3576,12 +3578,8 @@
 
     .card-icon,
     .miniapp-icon,
-    .chat-record-icon {
+    .link-thumb-placeholder {
       color: white;
-    }
-
-    .chat-record-more {
-      color: rgba(255, 255, 255, 0.9);
     }
 
     .appmsg-meta-badge {
@@ -4222,43 +4220,6 @@
     margin-top: 4px;
     padding-top: 4px;
     border-top: 1px solid var(--border-color);
-  }
-}
-
-// 聊天记录消息外观
-.chat-record-message {
-  background: var(--card-inner-bg) !important;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
-
-  &:hover {
-    background: var(--bg-hover) !important;
-  }
-
-  .chat-record-list {
-    font-size: 13px;
-    color: var(--text-tertiary);
-    line-height: 1.6;
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border-color);
-
-    .chat-record-item {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-
-      .source-name {
-        color: var(--text-secondary);
-      }
-    }
-  }
-
-  .chat-record-more {
-    font-size: 12px;
-    color: var(--text-tertiary);
-    margin-top: 4px;
   }
 }
 

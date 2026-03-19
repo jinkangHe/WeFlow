@@ -1,6 +1,7 @@
 import './preload-env'
 import { app, BrowserWindow, ipcMain, nativeTheme, session, Tray, Menu, nativeImage } from 'electron'
 import { Worker } from 'worker_threads'
+import { randomUUID } from 'crypto'
 import { join, dirname } from 'path'
 import { autoUpdater } from 'electron-updater'
 import { readFile, writeFile, mkdir, rm, readdir } from 'fs/promises'
@@ -112,6 +113,7 @@ let shouldShowMain = true
 let isAppQuitting = false
 let tray: Tray | null = null
 let isClosePromptVisible = false
+const chatHistoryPayloadStore = new Map<string, { sessionId: string; title?: string; recordList: any[] }>()
 
 type WindowCloseBehavior = 'ask' | 'tray' | 'quit'
 
@@ -769,6 +771,14 @@ function createImageViewerWindow(imagePath: string, liveVideoPath?: string) {
  * 创建独立的聊天记录窗口
  */
 function createChatHistoryWindow(sessionId: string, messageId: number) {
+  return createChatHistoryRouteWindow(`/chat-history/${sessionId}/${messageId}`)
+}
+
+function createChatHistoryPayloadWindow(payloadId: string) {
+  return createChatHistoryRouteWindow(`/chat-history-inline/${payloadId}`)
+}
+
+function createChatHistoryRouteWindow(route: string) {
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   const iconPath = isDev
     ? join(__dirname, '../public/icon.ico')
@@ -803,7 +813,7 @@ function createChatHistoryWindow(sessionId: string, messageId: number) {
   })
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    win.loadURL(`${process.env.VITE_DEV_SERVER_URL}#/chat-history/${sessionId}/${messageId}`)
+    win.loadURL(`${process.env.VITE_DEV_SERVER_URL}#${route}`)
 
     win.webContents.on('before-input-event', (event, input) => {
       if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) {
@@ -817,7 +827,7 @@ function createChatHistoryWindow(sessionId: string, messageId: number) {
     })
   } else {
     win.loadFile(join(__dirname, '../dist/index.html'), {
-      hash: `/chat-history/${sessionId}/${messageId}`
+      hash: route
     })
   }
 
@@ -1258,6 +1268,23 @@ function registerIpcHandlers() {
   ipcMain.handle('window:openChatHistoryWindow', (_, sessionId: string, messageId: number) => {
     createChatHistoryWindow(sessionId, messageId)
     return true
+  })
+
+  ipcMain.handle('window:openChatHistoryPayloadWindow', (_, payload: { sessionId: string; title?: string; recordList: any[] }) => {
+    const payloadId = randomUUID()
+    chatHistoryPayloadStore.set(payloadId, {
+      sessionId: String(payload?.sessionId || '').trim(),
+      title: String(payload?.title || '').trim() || '聊天记录',
+      recordList: Array.isArray(payload?.recordList) ? payload.recordList : []
+    })
+    createChatHistoryPayloadWindow(payloadId)
+    return true
+  })
+
+  ipcMain.handle('window:getChatHistoryPayload', (_, payloadId: string) => {
+    const payload = chatHistoryPayloadStore.get(String(payloadId || '').trim())
+    if (!payload) return { success: false, error: '聊天记录载荷不存在或已失效' }
+    return { success: true, payload }
   })
 
   // 打开会话聊天窗口（同会话仅保留一个窗口并聚焦）

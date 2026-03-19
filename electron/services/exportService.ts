@@ -49,6 +49,20 @@ interface ChatLabMessage {
   chatRecords?: any[]  // 嵌套的聊天记录
 }
 
+interface ForwardChatRecordItem {
+  datatype: number
+  sourcename: string
+  sourcetime: string
+  sourceheadurl?: string
+  datadesc?: string
+  datatitle?: string
+  fileext?: string
+  datasize?: number
+  chatRecordTitle?: string
+  chatRecordDesc?: string
+  chatRecordList?: ForwardChatRecordItem[]
+}
+
 interface ChatLabExport {
   chatlab: ChatLabHeader
   meta: ChatLabMeta
@@ -1231,12 +1245,13 @@ class ExportService {
    * 转换微信消息类型到 ChatLab 类型
    */
   private convertMessageType(localType: number, content: string): number {
-    // 检查 XML 中的 type 标签（支持大 localType 的情况）
-    const xmlTypeMatch = /<type>(\d+)<\/type>/i.exec(content)
-    const xmlType = xmlTypeMatch ? parseInt(xmlTypeMatch[1]) : null
+    const normalized = this.normalizeAppMessageContent(content || '')
+    const xmlTypeRaw = this.extractAppMessageType(normalized)
+    const xmlType = xmlTypeRaw ? Number.parseInt(xmlTypeRaw, 10) : null
+    const looksLikeAppMessage = localType === 49 || normalized.includes('<appmsg') || normalized.includes('<msg>')
 
     // 特殊处理 type 49 或 XML type
-    if (localType === 49 || xmlType) {
+    if (looksLikeAppMessage || xmlType) {
       const subType = xmlType || 0
       switch (subType) {
         case 6: return 4   // 文件 -> FILE
@@ -1248,7 +1263,7 @@ class ExportService {
         case 5:
         case 49: return 7  // 链接 -> LINK
         default:
-          if (xmlType) return 7 // 有 XML type 但未知，默认为链接
+          if (xmlType || looksLikeAppMessage) return 7 // 有 appmsg 但未知，默认为链接
       }
     }
     return MESSAGE_TYPE_MAP[localType] ?? 99 // 未知类型 -> OTHER
@@ -1549,9 +1564,8 @@ class ExportService {
   ): string | null {
     if (!content) return null
 
-    // 检查 XML 中的 type 标签（支持大 localType 的情况）
-    const xmlTypeMatch = /<type>(\d+)<\/type>/i.exec(content)
-    const xmlType = xmlTypeMatch ? xmlTypeMatch[1] : null
+    const normalizedContent = this.normalizeAppMessageContent(content)
+    const xmlType = this.extractAppMessageType(normalizedContent)
 
     switch (localType) {
       case 1: // 文本
@@ -1587,15 +1601,15 @@ class ExportService {
         return locParts.length > 0 ? `[位置] ${locParts.join(' ')}` : '[位置]'
       }
       case 49: {
-        const title = this.extractXmlValue(content, 'title')
-        const type = this.extractXmlValue(content, 'type')
-        const songName = this.extractXmlValue(content, 'songname')
+        const title = this.extractXmlValue(normalizedContent, 'title')
+        const type = this.extractAppMessageType(normalizedContent)
+        const songName = this.extractXmlValue(normalizedContent, 'songname')
 
         // 转账消息特殊处理
         if (type === '2000') {
-          const feedesc = this.extractXmlValue(content, 'feedesc')
-          const payMemo = this.extractXmlValue(content, 'pay_memo')
-          const transferPrefix = this.getTransferPrefix(content, myWxid, senderWxid, isSend)
+          const feedesc = this.extractXmlValue(normalizedContent, 'feedesc')
+          const payMemo = this.extractXmlValue(normalizedContent, 'pay_memo')
+          const transferPrefix = this.getTransferPrefix(normalizedContent, myWxid, senderWxid, isSend)
           if (feedesc) {
             return payMemo ? `${transferPrefix} ${feedesc} ${payMemo}` : `${transferPrefix} ${feedesc}`
           }
@@ -1604,7 +1618,7 @@ class ExportService {
 
         if (type === '3') return songName ? `[音乐] ${songName}` : (title ? `[音乐] ${title}` : '[音乐]')
         if (type === '6') return title ? `[文件] ${title}` : '[文件]'
-        if (type === '19') return title ? `[聊天记录] ${title}` : '[聊天记录]'
+        if (type === '19') return this.formatForwardChatRecordContent(normalizedContent)
         if (type === '33' || type === '36') return title ? `[小程序] ${title}` : '[小程序]'
         if (type === '57') return title || '[引用消息]'
         if (type === '5' || type === '49') return title ? `[链接] ${title}` : '[链接]'
@@ -1646,7 +1660,7 @@ class ExportService {
           // 其他类型
           if (xmlType === '3') return title ? `[音乐] ${title}` : '[音乐]'
           if (xmlType === '6') return title ? `[文件] ${title}` : '[文件]'
-          if (xmlType === '19') return title ? `[聊天记录] ${title}` : '[聊天记录]'
+          if (xmlType === '19') return this.formatForwardChatRecordContent(normalizedContent)
           if (xmlType === '33' || xmlType === '36') return title ? `[小程序] ${title}` : '[小程序]'
           if (xmlType === '57') return title || '[引用消息]'
           if (xmlType === '5' || xmlType === '49') return title ? `[链接] ${title}` : '[链接]'
@@ -1656,7 +1670,7 @@ class ExportService {
         }
 
         // 最后尝试提取文本内容
-        return this.stripSenderPrefix(content) || null
+        return this.stripSenderPrefix(normalizedContent) || null
     }
   }
 
@@ -1719,8 +1733,8 @@ class ExportService {
     const normalized = this.normalizeAppMessageContent(safeContent)
     const isAppMessage = normalized.includes('<appmsg') || normalized.includes('<msg>')
     if (localType === 49 || isAppMessage) {
-      const typeMatch = /<type>(\d+)<\/type>/i.exec(normalized)
-      const subType = typeMatch ? parseInt(typeMatch[1], 10) : 0
+      const subTypeRaw = this.extractAppMessageType(normalized)
+      const subType = subTypeRaw ? parseInt(subTypeRaw, 10) : 0
       const title = this.extractXmlValue(normalized, 'title') || this.extractXmlValue(normalized, 'appname')
 
       // 群公告消息（type 87）
@@ -1766,12 +1780,7 @@ class ExportService {
         return `[红包]${title || '微信红包'}`
       }
       if (subType === 19 || normalized.includes('<recorditem')) {
-        const forwardName =
-          this.extractXmlValue(normalized, 'nickname') ||
-          this.extractXmlValue(normalized, 'title') ||
-          this.extractXmlValue(normalized, 'des') ||
-          this.extractXmlValue(normalized, 'displayname')
-        return forwardName ? `[转发的聊天记录]${forwardName}` : '[转发的聊天记录]'
+        return this.formatForwardChatRecordContent(normalized)
       }
       if (subType === 33 || subType === 36) {
         const appName = this.extractXmlValue(normalized, 'appname') || title || '小程序'
@@ -1813,8 +1822,9 @@ class ExportService {
     if (localType === 43) return 'video'
     if (localType === 34) return 'voice'
     if (localType === 48) return 'location'
-    if (localType === 49) {
-      const xmlType = this.extractXmlValue(content || '', 'type')
+    const normalized = this.normalizeAppMessageContent(content || '')
+    const xmlType = this.extractAppMessageType(normalized)
+    if (localType === 49 || normalized.includes('<appmsg') || normalized.includes('<msg>')) {
       if (xmlType === '6') return 'file'
       return 'text'
     }
@@ -2023,8 +2033,8 @@ class ExportService {
   private getMessageTypeName(localType: number, content?: string): string {
     // 检查 XML 中的 type 标签（支持大 localType 的情况）
     if (content) {
-      const xmlTypeMatch = /<type>(\d+)<\/type>/i.exec(content)
-      const xmlType = xmlTypeMatch ? xmlTypeMatch[1] : null
+      const normalized = this.normalizeAppMessageContent(content)
+      const xmlType = this.extractAppMessageType(normalized)
 
       if (xmlType) {
         switch (xmlType) {
@@ -2146,45 +2156,38 @@ class ExportService {
   /**
    * 解析合并转发的聊天记录 (Type 19)
    */
-  private parseChatHistory(content: string): any[] | undefined {
+  private parseChatHistory(content: string): ForwardChatRecordItem[] | undefined {
     try {
-      const type = this.extractXmlValue(content, 'type')
-      if (type !== '19') return undefined
+      const normalized = this.normalizeAppMessageContent(content || '')
+      const appMsgType = this.extractAppMessageType(normalized)
+      if (appMsgType !== '19' && !normalized.includes('<recorditem')) {
+        return undefined
+      }
 
-      // 提取 recorditem 中的 CDATA
-      const match = /<recorditem>[\s\S]*?<!\[CDATA\[([\s\S]*?)\]\]>[\s\S]*?<\/recorditem>/.exec(content)
-      if (!match) return undefined
+      const items: ForwardChatRecordItem[] = []
+      const dedupe = new Set<string>()
+      const recordItemRegex = /<recorditem>([\s\S]*?)<\/recorditem>/gi
+      let recordItemMatch: RegExpExecArray | null
+      while ((recordItemMatch = recordItemRegex.exec(normalized)) !== null) {
+        const parsedItems = this.parseForwardChatRecordContainer(recordItemMatch[1] || '')
+        for (const item of parsedItems) {
+          const dedupeKey = `${item.datatype}|${item.sourcename}|${item.sourcetime}|${item.datadesc || ''}|${item.datatitle || ''}`
+          if (!dedupe.has(dedupeKey)) {
+            dedupe.add(dedupeKey)
+            items.push(item)
+          }
+        }
+      }
 
-      const innerXml = match[1]
-      const items: any[] = []
-      const itemRegex = /<dataitem\s+(.*?)>([\s\S]*?)<\/dataitem>/g
-      let itemMatch
-
-      while ((itemMatch = itemRegex.exec(innerXml)) !== null) {
-        const attrs = itemMatch[1]
-        const body = itemMatch[2]
-
-        const datatypeMatch = /datatype="(\d+)"/.exec(attrs)
-        const datatype = datatypeMatch ? parseInt(datatypeMatch[1]) : 0
-
-        const sourcename = this.extractXmlValue(body, 'sourcename')
-        const sourcetime = this.extractXmlValue(body, 'sourcetime')
-        const sourceheadurl = this.extractXmlValue(body, 'sourceheadurl')
-        const datadesc = this.extractXmlValue(body, 'datadesc')
-        const datatitle = this.extractXmlValue(body, 'datatitle')
-        const fileext = this.extractXmlValue(body, 'fileext')
-        const datasize = parseInt(this.extractXmlValue(body, 'datasize') || '0')
-
-        items.push({
-          datatype,
-          sourcename,
-          sourcetime,
-          sourceheadurl,
-          datadesc: this.decodeHtmlEntities(datadesc),
-          datatitle: this.decodeHtmlEntities(datatitle),
-          fileext,
-          datasize
-        })
+      if (items.length === 0 && normalized.includes('<dataitem')) {
+        const fallbackItems = this.parseForwardChatRecordContainer(normalized)
+        for (const item of fallbackItems) {
+          const dedupeKey = `${item.datatype}|${item.sourcename}|${item.sourcetime}|${item.datadesc || ''}|${item.datatitle || ''}`
+          if (!dedupe.has(dedupeKey)) {
+            dedupe.add(dedupeKey)
+            items.push(item)
+          }
+        }
       }
 
       return items.length > 0 ? items : undefined
@@ -2192,6 +2195,139 @@ class ExportService {
       console.error('ExportService: 解析聊天记录失败:', e)
       return undefined
     }
+  }
+
+  private parseForwardChatRecordContainer(containerXml: string): ForwardChatRecordItem[] {
+    const source = containerXml || ''
+    if (!source) return []
+
+    const segments: string[] = [source]
+    const decodedContainer = this.decodeHtmlEntities(source)
+    if (decodedContainer !== source) {
+      segments.push(decodedContainer)
+    }
+
+    const cdataRegex = /<!\[CDATA\[([\s\S]*?)\]\]>/g
+    let cdataMatch: RegExpExecArray | null
+    while ((cdataMatch = cdataRegex.exec(source)) !== null) {
+      const cdataInner = cdataMatch[1] || ''
+      if (cdataInner) {
+        segments.push(cdataInner)
+        const decodedInner = this.decodeHtmlEntities(cdataInner)
+        if (decodedInner !== cdataInner) {
+          segments.push(decodedInner)
+        }
+      }
+    }
+
+    const items: ForwardChatRecordItem[] = []
+    const seen = new Set<string>()
+    for (const segment of segments) {
+      if (!segment) continue
+      const dataItemRegex = /<dataitem\b([^>]*)>([\s\S]*?)<\/dataitem>/gi
+      let dataItemMatch: RegExpExecArray | null
+      while ((dataItemMatch = dataItemRegex.exec(segment)) !== null) {
+        const parsed = this.parseForwardChatRecordDataItem(dataItemMatch[2] || '', dataItemMatch[1] || '')
+        if (!parsed) continue
+        const key = `${parsed.datatype}|${parsed.sourcename}|${parsed.sourcetime}|${parsed.datadesc || ''}|${parsed.datatitle || ''}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          items.push(parsed)
+        }
+      }
+    }
+
+    if (items.length > 0) return items
+    const fallback = this.parseForwardChatRecordDataItem(source, '')
+    return fallback ? [fallback] : []
+  }
+
+  private parseForwardChatRecordDataItem(body: string, attrs: string): ForwardChatRecordItem | null {
+    const datatypeByAttr = /datatype\s*=\s*["']?(\d+)["']?/i.exec(attrs || '')
+    const datatypeRaw = datatypeByAttr?.[1] || this.extractXmlValue(body, 'datatype') || '0'
+    const datatype = Number.parseInt(datatypeRaw, 10)
+    const sourcename = this.decodeHtmlEntities(this.extractXmlValue(body, 'sourcename'))
+    const sourcetime = this.extractXmlValue(body, 'sourcetime')
+    const sourceheadurl = this.extractXmlValue(body, 'sourceheadurl')
+    const datadesc = this.decodeHtmlEntities(this.extractXmlValue(body, 'datadesc') || this.extractXmlValue(body, 'content'))
+    const datatitle = this.decodeHtmlEntities(this.extractXmlValue(body, 'datatitle'))
+    const fileext = this.extractXmlValue(body, 'fileext')
+    const datasizeRaw = this.extractXmlValue(body, 'datasize')
+    const datasize = datasizeRaw ? Number.parseInt(datasizeRaw, 10) : 0
+    const nestedRecordXml = this.extractXmlValue(body, 'recordxml') || ''
+    const nestedRecordList =
+      datatype === 17 && nestedRecordXml
+        ? this.parseForwardChatRecordContainer(nestedRecordXml)
+        : undefined
+    const chatRecordTitle = this.decodeHtmlEntities(
+      (nestedRecordXml && this.extractXmlValue(nestedRecordXml, 'title')) || datatitle || ''
+    )
+    const chatRecordDesc = this.decodeHtmlEntities(
+      (nestedRecordXml && this.extractXmlValue(nestedRecordXml, 'desc')) || datadesc || ''
+    )
+
+    if (!sourcename && !datadesc && !datatitle) return null
+
+    return {
+      datatype: Number.isFinite(datatype) ? datatype : 0,
+      sourcename: sourcename || '',
+      sourcetime: sourcetime || '',
+      sourceheadurl: sourceheadurl || undefined,
+      datadesc: datadesc || undefined,
+      datatitle: datatitle || undefined,
+      fileext: fileext || undefined,
+      datasize: Number.isFinite(datasize) && datasize > 0 ? datasize : undefined,
+      chatRecordTitle: chatRecordTitle || undefined,
+      chatRecordDesc: chatRecordDesc || undefined,
+      chatRecordList: nestedRecordList && nestedRecordList.length > 0 ? nestedRecordList : undefined
+    }
+  }
+
+  private formatForwardChatRecordItemText(item: ForwardChatRecordItem): string {
+    const desc = (item.datadesc || '').trim()
+    const title = (item.datatitle || '').trim()
+    if (desc) return desc
+    if (title) return title
+    switch (item.datatype) {
+      case 3: return '[图片]'
+      case 34: return '[语音消息]'
+      case 43: return '[视频]'
+      case 47: return '[动画表情]'
+      case 49:
+      case 8: return title ? `[文件] ${title}` : '[文件]'
+      case 17: return item.chatRecordDesc || title || '[聊天记录]'
+      default: return '[消息]'
+    }
+  }
+
+  private buildForwardChatRecordLines(record: ForwardChatRecordItem, depth = 0): string[] {
+    const indent = depth > 0 ? `${'  '.repeat(Math.min(depth, 8))}` : ''
+    const senderPrefix = record.sourcename ? `${record.sourcename}: ` : ''
+    if (record.chatRecordList && record.chatRecordList.length > 0) {
+      const nestedTitle = record.chatRecordTitle || record.datatitle || record.chatRecordDesc || '聊天记录'
+      const header = `${indent}${senderPrefix}[转发的聊天记录]${nestedTitle}`
+      const nestedLines = record.chatRecordList.flatMap((item) => this.buildForwardChatRecordLines(item, depth + 1))
+      return [header, ...nestedLines]
+    }
+    const text = this.formatForwardChatRecordItemText(record)
+    return [`${indent}${senderPrefix}${text}`]
+  }
+
+  private formatForwardChatRecordContent(content: string): string {
+    const normalized = this.normalizeAppMessageContent(content || '')
+    const forwardName =
+      this.extractXmlValue(normalized, 'nickname') ||
+      this.extractXmlValue(normalized, 'title') ||
+      this.extractXmlValue(normalized, 'des') ||
+      this.extractXmlValue(normalized, 'displayname') ||
+      '聊天记录'
+    const records = this.parseChatHistory(normalized)
+    if (!records || records.length === 0) {
+      return forwardName ? `[转发的聊天记录]${forwardName}` : '[转发的聊天记录]'
+    }
+
+    const lines = records.flatMap((record) => this.buildForwardChatRecordLines(record))
+    return `${forwardName ? `[转发的聊天记录]${forwardName}` : '[转发的聊天记录]'}\n${lines.join('\n')}`
   }
 
   /**
@@ -2230,7 +2366,8 @@ class ExportService {
 
   private extractAppMessageType(content: string): string {
     if (!content) return ''
-    const appmsgMatch = /<appmsg[\s\S]*?>([\s\S]*?)<\/appmsg>/i.exec(content)
+    const normalized = this.normalizeAppMessageContent(content)
+    const appmsgMatch = /<appmsg[\s\S]*?>([\s\S]*?)<\/appmsg>/i.exec(normalized)
     if (appmsgMatch) {
       const appmsgInner = appmsgMatch[1]
         .replace(/<refermsg[\s\S]*?<\/refermsg>/gi, '')
@@ -2238,7 +2375,11 @@ class ExportService {
       const typeMatch = /<type>([\s\S]*?)<\/type>/i.exec(appmsgInner)
       if (typeMatch) return typeMatch[1].trim()
     }
-    return this.extractXmlValue(content, 'type')
+    if (!normalized.includes('<appmsg') && !normalized.includes('<msg>')) {
+      return ''
+    }
+    const fallbackTypeMatch = /<type>(\d+)<\/type>/i.exec(normalized)
+    return fallbackTypeMatch ? fallbackTypeMatch[1] : ''
   }
 
   private looksLikeWxid(text: string): boolean {
@@ -2600,7 +2741,7 @@ class ExportService {
     const isAppMessage = localType === 49 || normalized.includes('<appmsg') || normalized.includes('<msg>')
     if (!isAppMessage) return null
 
-    const subType = this.extractXmlValue(normalized, 'type')
+    const subType = this.extractAppMessageType(normalized)
     if (subType && subType !== '5' && subType !== '49') return null
 
     const url = this.normalizeHtmlLinkUrl(this.extractXmlValue(normalized, 'url'))
@@ -3444,11 +3585,12 @@ class ExportService {
             } else if (localType === 43 && content) {
               // 视频消息
               videoMd5 = videoMd5 || this.extractVideoMd5(content)
-            } else if (collectMode === 'full' && localType === 49 && content) {
-              // 检查是否是聊天记录消息（type=19）
-              const xmlType = this.extractXmlValue(content, 'type')
+            } else if (collectMode === 'full' && content && (localType === 49 || content.includes('<appmsg') || content.includes('&lt;appmsg'))) {
+              // 检查是否是聊天记录消息（type=19），兼容大 localType 的 appmsg
+              const normalizedContent = this.normalizeAppMessageContent(content)
+              const xmlType = this.extractAppMessageType(normalizedContent)
               if (xmlType === '19') {
-                chatRecordList = this.parseChatHistory(content)
+                chatRecordList = this.parseChatHistory(normalizedContent)
               }
             }
           }
