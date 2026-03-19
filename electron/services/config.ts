@@ -123,7 +123,8 @@ export class ConfigService {
 
     const storeOptions: any = {
       name: 'WeFlow-config',
-      defaults
+      defaults,
+      projectName: String(process.env.WEFLOW_PROJECT_NAME || 'WeFlow').trim() || 'WeFlow'
     }
     const runningInWorker = process.env.WEFLOW_WORKER === '1'
     if (runningInWorker) {
@@ -131,7 +132,6 @@ export class ConfigService {
       if (cwd) {
         storeOptions.cwd = cwd
       }
-      storeOptions.projectName = String(process.env.WEFLOW_PROJECT_NAME || 'WeFlow').trim() || 'WeFlow'
     }
 
     try {

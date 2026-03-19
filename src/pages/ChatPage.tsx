@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../stores/chatStore'
-import { useBatchTranscribeStore } from '../stores/batchTranscribeStore'
+import { useBatchTranscribeStore, type BatchVoiceTaskType } from '../stores/batchTranscribeStore'
 import { useBatchImageDecryptStore } from '../stores/batchImageDecryptStore'
 import type { ChatSession, Message } from '../types/models'
 import { getEmojiPath } from 'wechat-emojis'
@@ -855,6 +855,7 @@ function ChatPage(props: ChatPageProps) {
   const visibleMessageRangeRef = useRef<{ startIndex: number; endIndex: number }>({ startIndex: 0, endIndex: 0 })
   const topRangeLoadLockRef = useRef(false)
   const bottomRangeLoadLockRef = useRef(false)
+  const suppressAutoLoadLaterRef = useRef(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const sidebarRef = useRef<HTMLDivElement>(null)
   const handleMessageListScrollParentRef = useCallback((node: HTMLDivElement | null) => {
@@ -939,6 +940,7 @@ function ChatPage(props: ChatPageProps) {
   // 批量语音转文字相关状态（进度/结果 由全局 store 管理）
   const {
     isBatchTranscribing,
+    runningBatchVoiceTaskType,
     batchTranscribeProgress,
     startTranscribe,
     updateProgress,
@@ -946,6 +948,7 @@ function ChatPage(props: ChatPageProps) {
     setShowBatchProgress
   } = useBatchTranscribeStore(useShallow((state) => ({
     isBatchTranscribing: state.isBatchTranscribing,
+    runningBatchVoiceTaskType: state.taskType,
     batchTranscribeProgress: state.progress,
     startTranscribe: state.startTranscribe,
     updateProgress: state.updateProgress,
@@ -972,6 +975,7 @@ function ChatPage(props: ChatPageProps) {
   const [batchVoiceMessages, setBatchVoiceMessages] = useState<Message[] | null>(null)
   const [batchVoiceDates, setBatchVoiceDates] = useState<string[]>([])
   const [batchSelectedDates, setBatchSelectedDates] = useState<Set<string>>(new Set())
+  const [batchVoiceTaskType, setBatchVoiceTaskType] = useState<BatchVoiceTaskType>('transcribe')
   const [showBatchDecryptConfirm, setShowBatchDecryptConfirm] = useState(false)
   const [batchImageMessages, setBatchImageMessages] = useState<BatchImageDecryptCandidate[] | null>(null)
   const [batchImageDates, setBatchImageDates] = useState<string[]>([])
@@ -4054,6 +4058,7 @@ function ChatPage(props: ChatPageProps) {
     if (
       range.endIndex >= total - 3 &&
       !bottomRangeLoadLockRef.current &&
+      !suppressAutoLoadLaterRef.current &&
       !isLoadingMore &&
       !isLoadingMessages &&
       hasMoreLater &&
@@ -4122,6 +4127,8 @@ function ChatPage(props: ChatPageProps) {
 
     if (!effectiveAtBottom) {
       bottomRangeLoadLockRef.current = false
+      // 用户主动离开底部后，解除“搜索跳转后的自动向后加载抑制”
+      suppressAutoLoadLaterRef.current = false
     }
 
     if (
@@ -4141,6 +4148,21 @@ function ChatPage(props: ChatPageProps) {
     const shouldShow = distanceFromBottom > 180
     setShowScrollToBottom(prev => (prev === shouldShow ? prev : shouldShow))
   }, [messages.length, isLoadingMessages, isLoadingMore, isSessionSwitching])
+
+  const handleMessageListWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if (event.deltaY <= 18) return
+    if (!currentSessionId || isLoadingMore || isLoadingMessages || !hasMoreLater) return
+    const listEl = messageListRef.current
+    if (!listEl) return
+    const distanceFromBottom = listEl.scrollHeight - (listEl.scrollTop + listEl.clientHeight)
+    if (distanceFromBottom > 96) return
+    if (bottomRangeLoadLockRef.current) return
+
+    // 用户明确向下滚动时允许加载后续消息
+    suppressAutoLoadLaterRef.current = false
+    bottomRangeLoadLockRef.current = true
+    void loadLaterMessages()
+  }, [currentSessionId, hasMoreLater, isLoadingMessages, isLoadingMore, loadLaterMessages])
 
   const handleMessageAtTopStateChange = useCallback((atTop: boolean) => {
     if (!atTop) {
@@ -4213,6 +4235,8 @@ function ChatPage(props: ChatPageProps) {
       setCurrentOffset(0)
       setJumpStartTime(0)
       setJumpEndTime(anchorEndTime)
+      // 搜索跳转后默认不自动回流到最新消息，仅在用户主动向下滚动时加载后续
+      suppressAutoLoadLaterRef.current = true
       flashNewMessages([targetMessageKey])
       void loadMessages(targetSessionId, 0, 0, anchorEndTime, false, {
         inSessionJumpRequestSeq: requestSeq
@@ -5015,6 +5039,7 @@ function ChatPage(props: ChatPageProps) {
     setBatchVoiceCount(voiceMessages.length)
     setBatchVoiceDates(sortedDates)
     setBatchSelectedDates(new Set(sortedDates))
+    setBatchVoiceTaskType('transcribe')
     setShowBatchConfirm(true)
   }, [sessions, currentSessionId, isBatchTranscribing])
 
@@ -5078,7 +5103,7 @@ function ChatPage(props: ChatPageProps) {
     })
   }, [currentSessionId, navigate, isGroupChatSession])
 
-  // 确认批量转写
+  // 确认批量语音任务（解密/转写）
   const confirmBatchTranscribe = useCallback(async () => {
     if (!currentSessionId) return
 
@@ -5110,23 +5135,35 @@ function ChatPage(props: ChatPageProps) {
     const session = sessions.find(s => s.username === currentSessionId)
     if (!session) return
 
-    startTranscribe(voiceMessages.length, session.displayName || session.username)
+    const taskType = batchVoiceTaskType
+    startTranscribe(voiceMessages.length, session.displayName || session.username, taskType)
 
-    // 检查模型状态
-    const modelStatus = await window.electronAPI.whisper.getModelStatus()
-    if (!modelStatus?.exists) {
-      alert('SenseVoice 模型未下载，请先在设置中下载模型')
-      finishTranscribe(0, 0)
-      return
+    if (taskType === 'transcribe') {
+      // 检查模型状态
+      const modelStatus = await window.electronAPI.whisper.getModelStatus()
+      if (!modelStatus?.exists) {
+        alert('SenseVoice 模型未下载，请先在设置中下载模型')
+        finishTranscribe(0, 0)
+        return
+      }
     }
 
     let successCount = 0
     let failCount = 0
     let completedCount = 0
-    const concurrency = 10
+    const concurrency = taskType === 'decrypt' ? 12 : 10
 
-    const transcribeOne = async (msg: Message) => {
+    const runOne = async (msg: Message) => {
       try {
+        if (taskType === 'decrypt') {
+          const result = await window.electronAPI.chat.getVoiceData(
+            session.username,
+            String(msg.localId),
+            msg.createTime,
+            msg.serverIdRaw || msg.serverId
+          )
+          return { success: Boolean(result.success && result.data) }
+        }
         const result = await window.electronAPI.chat.getVoiceTranscript(
           session.username,
           String(msg.localId),
@@ -5140,7 +5177,7 @@ function ChatPage(props: ChatPageProps) {
 
     for (let i = 0; i < voiceMessages.length; i += concurrency) {
       const batch = voiceMessages.slice(i, i + concurrency)
-      const results = await Promise.all(batch.map(msg => transcribeOne(msg)))
+      const results = await Promise.all(batch.map(msg => runOne(msg)))
 
       results.forEach(result => {
         if (result.success) successCount++
@@ -5151,7 +5188,7 @@ function ChatPage(props: ChatPageProps) {
     }
 
     finishTranscribe(successCount, failCount)
-  }, [sessions, currentSessionId, batchSelectedDates, batchVoiceMessages, startTranscribe, updateProgress, finishTranscribe])
+  }, [sessions, currentSessionId, batchSelectedDates, batchVoiceMessages, batchVoiceTaskType, startTranscribe, updateProgress, finishTranscribe])
 
   // 批量转写：按日期的消息数量
   const batchCountByDate = useMemo(() => {
@@ -5171,6 +5208,12 @@ function ChatPage(props: ChatPageProps) {
       batchSelectedDates.has(new Date(m.createTime * 1000).toISOString().slice(0, 10))
     ).length
   }, [batchVoiceMessages, batchSelectedDates])
+
+  const batchVoiceTaskTitle = batchVoiceTaskType === 'decrypt' ? '批量解密语音' : '批量语音转文字'
+  const batchVoiceTaskVerb = batchVoiceTaskType === 'decrypt' ? '解密' : '转写'
+  const batchVoiceTaskMinutes = Math.ceil(
+    batchSelectedMessageCount * (batchVoiceTaskType === 'decrypt' ? 0.6 : 2) / 60
+  )
 
   const toggleBatchDate = useCallback((date: string) => {
     setBatchSelectedDates(prev => {
@@ -5965,7 +6008,9 @@ function ChatPage(props: ChatPageProps) {
                       }
                     }}
                     disabled={!currentSessionId}
-                    title={isBatchTranscribing ? `批量转写中 (${batchTranscribeProgress.current}/${batchTranscribeProgress.total})，点击查看进度` : '批量语音转文字'}
+                    title={isBatchTranscribing
+                      ? `${runningBatchVoiceTaskType === 'decrypt' ? '批量语音解密' : '批量转写'}中 (${batchTranscribeProgress.current}/${batchTranscribeProgress.total})，点击查看进度`
+                      : '批量语音处理（解密/转文字）'}
                   >
                     {isBatchTranscribing ? (
                       <Loader2 size={18} className="spin" />
@@ -6176,6 +6221,7 @@ function ChatPage(props: ChatPageProps) {
               <div
                 className={`message-list ${hasInitialMessages ? 'loaded' : 'loading'}`}
                 ref={handleMessageListScrollParentRef}
+                onWheel={handleMessageListWheel}
               >
                 {!isLoadingMessages && messages.length === 0 && !hasMoreMessages ? (
                   <div className="empty-chat-inline">
@@ -6583,10 +6629,26 @@ function ChatPage(props: ChatPageProps) {
           <div className="batch-modal-content batch-confirm-modal" onClick={(e) => e.stopPropagation()}>
             <div className="batch-modal-header">
               <Mic size={20} />
-              <h3>批量语音转文字</h3>
+              <h3>{batchVoiceTaskTitle}</h3>
             </div>
             <div className="batch-modal-body">
-              <p>选择要转写的日期（仅显示有语音的日期），然后开始转写。</p>
+              <p>先选择任务类型，再选择日期（仅显示有语音的日期），然后开始处理。</p>
+              <div className="batch-task-switch" role="tablist" aria-label="语音批量任务类型">
+                <button
+                  type="button"
+                  className={`batch-task-btn${batchVoiceTaskType === 'decrypt' ? ' active' : ''}`}
+                  onClick={() => setBatchVoiceTaskType('decrypt')}
+                >
+                  批量解密语音
+                </button>
+                <button
+                  type="button"
+                  className={`batch-task-btn${batchVoiceTaskType === 'transcribe' ? ' active' : ''}`}
+                  onClick={() => setBatchVoiceTaskType('transcribe')}
+                >
+                  批量转文字
+                </button>
+              </div>
               {batchVoiceDates.length > 0 && (
                 <div className="batch-dates-list-wrap">
                   <div className="batch-dates-actions">
@@ -6621,12 +6683,16 @@ function ChatPage(props: ChatPageProps) {
                 </div>
                 <div className="info-item">
                   <span className="label">预计耗时:</span>
-                  <span className="value">约 {Math.ceil(batchSelectedMessageCount * 2 / 60)} 分钟</span>
+                  <span className="value">约 {batchVoiceTaskMinutes} 分钟</span>
                 </div>
               </div>
               <div className="batch-warning">
                 <AlertCircle size={16} />
-                <span>批量转写可能需要较长时间，转写过程中可以继续使用其他功能。已转写过的语音会自动跳过。</span>
+                <span>
+                  {batchVoiceTaskType === 'decrypt'
+                    ? '批量解密会预先缓存语音数据，之后播放和转写会更快。解密过程中可以继续使用其他功能。'
+                    : '批量转写可能需要较长时间，转写过程中可以继续使用其他功能。已转写过的语音会自动跳过。'}
+                </span>
               </div>
             </div>
             <div className="batch-modal-footer">
@@ -6635,7 +6701,7 @@ function ChatPage(props: ChatPageProps) {
               </button>
               <button className="btn-primary batch-transcribe-start-btn" onClick={confirmBatchTranscribe}>
                 <Mic size={16} />
-                开始转写
+                开始{batchVoiceTaskVerb}
               </button>
             </div>
           </div>

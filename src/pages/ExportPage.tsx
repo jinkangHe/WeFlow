@@ -109,6 +109,12 @@ interface TaskProgress {
   estimatedTotalMessages: number
   collectedMessages: number
   writtenFiles: number
+  mediaDoneFiles: number
+  mediaCacheHitFiles: number
+  mediaCacheMissFiles: number
+  mediaCacheFillFiles: number
+  mediaDedupReuseFiles: number
+  mediaBytesWritten: number
 }
 
 type TaskPerfStage = 'collect' | 'build' | 'write' | 'other'
@@ -263,7 +269,13 @@ const createEmptyProgress = (): TaskProgress => ({
   exportedMessages: 0,
   estimatedTotalMessages: 0,
   collectedMessages: 0,
-  writtenFiles: 0
+  writtenFiles: 0,
+  mediaDoneFiles: 0,
+  mediaCacheHitFiles: 0,
+  mediaCacheMissFiles: 0,
+  mediaCacheFillFiles: 0,
+  mediaDedupReuseFiles: 0,
+  mediaBytesWritten: 0
 })
 
 const createEmptyTaskPerformance = (): TaskPerformance => ({
@@ -1302,6 +1314,17 @@ const TaskCenterModal = memo(function TaskCenterModal({
                   : `已收集 ${collectedMessages.toLocaleString()} 条`
                 const phaseProgress = Math.max(0, Math.floor(task.progress.phaseProgress || 0))
                 const phaseTotal = Math.max(0, Math.floor(task.progress.phaseTotal || 0))
+                const mediaDoneFiles = Math.max(0, Math.floor(task.progress.mediaDoneFiles || 0))
+                const mediaCacheHitFiles = Math.max(0, Math.floor(task.progress.mediaCacheHitFiles || 0))
+                const mediaCacheMissFiles = Math.max(0, Math.floor(task.progress.mediaCacheMissFiles || 0))
+                const mediaDedupReuseFiles = Math.max(0, Math.floor(task.progress.mediaDedupReuseFiles || 0))
+                const mediaCacheTotal = mediaCacheHitFiles + mediaCacheMissFiles
+                const mediaCacheMetricLabel = mediaCacheTotal > 0
+                  ? `缓存命中 ${mediaCacheHitFiles}/${mediaCacheTotal}`
+                  : ''
+                const mediaDedupMetricLabel = mediaDedupReuseFiles > 0
+                  ? `复用 ${mediaDedupReuseFiles}`
+                  : ''
                 const phaseMetricLabel = phaseTotal > 0
                   ? (
                     task.progress.phase === 'exporting-media'
@@ -1310,6 +1333,9 @@ const TaskCenterModal = memo(function TaskCenterModal({
                         ? `语音 ${Math.min(phaseProgress, phaseTotal)}/${phaseTotal}`
                         : ''
                   )
+                  : ''
+                const mediaLiveMetricLabel = task.progress.phase === 'exporting-media'
+                  ? (mediaDoneFiles > 0 ? `已处理 ${mediaDoneFiles}` : '')
                   : ''
                 const sessionProgressLabel = completedSessionTotal > 0
                   ? `会话 ${completedSessionCount}/${completedSessionTotal}`
@@ -1336,6 +1362,9 @@ const TaskCenterModal = memo(function TaskCenterModal({
                           <div className="task-progress-text">
                             {`${sessionProgressLabel} · ${effectiveMessageProgressLabel}`}
                             {phaseMetricLabel ? ` · ${phaseMetricLabel}` : ''}
+                            {mediaLiveMetricLabel ? ` · ${mediaLiveMetricLabel}` : ''}
+                            {mediaCacheMetricLabel ? ` · ${mediaCacheMetricLabel}` : ''}
+                            {mediaDedupMetricLabel ? ` · ${mediaDedupMetricLabel}` : ''}
                             {task.status === 'running' && currentSessionRatio !== null
                               ? `（当前会话 ${Math.round(currentSessionRatio * 100)}%）`
                               : ''}
@@ -4280,6 +4309,42 @@ function ExportPage() {
         const writtenFiles = Number.isFinite(payload.writtenFiles)
           ? Math.max(task.progress.writtenFiles, Math.max(0, Math.floor(Number(payload.writtenFiles || 0))))
           : task.progress.writtenFiles
+        const prevMediaDoneFiles = Number.isFinite(task.progress.mediaDoneFiles)
+          ? Math.max(0, Math.floor(Number(task.progress.mediaDoneFiles || 0)))
+          : 0
+        const prevMediaCacheHitFiles = Number.isFinite(task.progress.mediaCacheHitFiles)
+          ? Math.max(0, Math.floor(Number(task.progress.mediaCacheHitFiles || 0)))
+          : 0
+        const prevMediaCacheMissFiles = Number.isFinite(task.progress.mediaCacheMissFiles)
+          ? Math.max(0, Math.floor(Number(task.progress.mediaCacheMissFiles || 0)))
+          : 0
+        const prevMediaCacheFillFiles = Number.isFinite(task.progress.mediaCacheFillFiles)
+          ? Math.max(0, Math.floor(Number(task.progress.mediaCacheFillFiles || 0)))
+          : 0
+        const prevMediaDedupReuseFiles = Number.isFinite(task.progress.mediaDedupReuseFiles)
+          ? Math.max(0, Math.floor(Number(task.progress.mediaDedupReuseFiles || 0)))
+          : 0
+        const prevMediaBytesWritten = Number.isFinite(task.progress.mediaBytesWritten)
+          ? Math.max(0, Math.floor(Number(task.progress.mediaBytesWritten || 0)))
+          : 0
+        const mediaDoneFiles = Number.isFinite(payload.mediaDoneFiles)
+          ? Math.max(prevMediaDoneFiles, Math.max(0, Math.floor(Number(payload.mediaDoneFiles || 0))))
+          : prevMediaDoneFiles
+        const mediaCacheHitFiles = Number.isFinite(payload.mediaCacheHitFiles)
+          ? Math.max(prevMediaCacheHitFiles, Math.max(0, Math.floor(Number(payload.mediaCacheHitFiles || 0))))
+          : prevMediaCacheHitFiles
+        const mediaCacheMissFiles = Number.isFinite(payload.mediaCacheMissFiles)
+          ? Math.max(prevMediaCacheMissFiles, Math.max(0, Math.floor(Number(payload.mediaCacheMissFiles || 0))))
+          : prevMediaCacheMissFiles
+        const mediaCacheFillFiles = Number.isFinite(payload.mediaCacheFillFiles)
+          ? Math.max(prevMediaCacheFillFiles, Math.max(0, Math.floor(Number(payload.mediaCacheFillFiles || 0))))
+          : prevMediaCacheFillFiles
+        const mediaDedupReuseFiles = Number.isFinite(payload.mediaDedupReuseFiles)
+          ? Math.max(prevMediaDedupReuseFiles, Math.max(0, Math.floor(Number(payload.mediaDedupReuseFiles || 0))))
+          : prevMediaDedupReuseFiles
+        const mediaBytesWritten = Number.isFinite(payload.mediaBytesWritten)
+          ? Math.max(prevMediaBytesWritten, Math.max(0, Math.floor(Number(payload.mediaBytesWritten || 0))))
+          : prevMediaBytesWritten
         return {
           ...task,
           progress: {
@@ -4295,7 +4360,13 @@ function ExportPage() {
               ? Math.max(task.progress.estimatedTotalMessages, aggregatedMessageProgress.estimated)
               : (task.progress.estimatedTotalMessages > 0 ? task.progress.estimatedTotalMessages : 0),
             collectedMessages: Math.max(task.progress.collectedMessages, collectedMessages),
-            writtenFiles
+            writtenFiles,
+            mediaDoneFiles,
+            mediaCacheHitFiles,
+            mediaCacheMissFiles,
+            mediaCacheFillFiles,
+            mediaDedupReuseFiles,
+            mediaBytesWritten
           },
           settledSessionIds: nextSettledSessionIds,
           performance
@@ -4336,7 +4407,13 @@ function ExportPage() {
               exportedMessages: payload.total > 0 ? Math.max(0, Math.floor(payload.current || 0)) : task.progress.exportedMessages,
               estimatedTotalMessages: payload.total > 0 ? Math.max(0, Math.floor(payload.total || 0)) : task.progress.estimatedTotalMessages,
               collectedMessages: task.progress.collectedMessages,
-              writtenFiles: task.progress.writtenFiles
+              writtenFiles: task.progress.writtenFiles,
+              mediaDoneFiles: task.progress.mediaDoneFiles,
+              mediaCacheHitFiles: task.progress.mediaCacheHitFiles,
+              mediaCacheMissFiles: task.progress.mediaCacheMissFiles,
+              mediaCacheFillFiles: task.progress.mediaCacheFillFiles,
+              mediaDedupReuseFiles: task.progress.mediaDedupReuseFiles,
+              mediaBytesWritten: task.progress.mediaBytesWritten
             }
           }
         })

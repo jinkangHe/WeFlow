@@ -133,6 +133,29 @@ export interface ExportProgress {
   exportedMessages?: number
   estimatedTotalMessages?: number
   writtenFiles?: number
+  mediaDoneFiles?: number
+  mediaCacheHitFiles?: number
+  mediaCacheMissFiles?: number
+  mediaCacheFillFiles?: number
+  mediaDedupReuseFiles?: number
+  mediaBytesWritten?: number
+}
+
+interface MediaExportTelemetry {
+  doneFiles: number
+  cacheHitFiles: number
+  cacheMissFiles: number
+  cacheFillFiles: number
+  dedupReuseFiles: number
+  bytesWritten: number
+}
+
+interface MediaSourceResolution {
+  sourcePath: string
+  cacheHit: boolean
+  cachePath?: string
+  fileStat?: { size: number; mtimeMs: number }
+  dedupeKey?: string
 }
 
 interface ExportTaskControl {
@@ -218,6 +241,14 @@ class ExportService {
   private readonly STOP_ERROR_CODE = 'WEFLOW_EXPORT_STOP_REQUESTED'
   private mediaFileCachePopulatePending = new Map<string, Promise<string | null>>()
   private mediaFileCacheReadyDirs = new Set<string>()
+  private mediaExportTelemetry: MediaExportTelemetry | null = null
+  private mediaRunSourceDedupMap = new Map<string, string>()
+  private mediaFileCacheCleanupPending: Promise<void> | null = null
+  private mediaFileCacheLastCleanupAt = 0
+  private readonly mediaFileCacheCleanupIntervalMs = 30 * 60 * 1000
+  private readonly mediaFileCacheMaxBytes = 6 * 1024 * 1024 * 1024
+  private readonly mediaFileCacheMaxFiles = 120000
+  private readonly mediaFileCacheTtlMs = 45 * 24 * 60 * 60 * 1000
 
   constructor() {
     this.configService = new ConfigService()
@@ -456,6 +487,62 @@ class ExportService {
     return path.join(this.configService.getCacheBasePath(), 'export-media-files')
   }
 
+  private createEmptyMediaTelemetry(): MediaExportTelemetry {
+    return {
+      doneFiles: 0,
+      cacheHitFiles: 0,
+      cacheMissFiles: 0,
+      cacheFillFiles: 0,
+      dedupReuseFiles: 0,
+      bytesWritten: 0
+    }
+  }
+
+  private resetMediaRuntimeState(): void {
+    this.mediaExportTelemetry = this.createEmptyMediaTelemetry()
+    this.mediaRunSourceDedupMap.clear()
+  }
+
+  private clearMediaRuntimeState(): void {
+    this.mediaExportTelemetry = null
+    this.mediaRunSourceDedupMap.clear()
+  }
+
+  private getMediaTelemetrySnapshot(): Partial<ExportProgress> {
+    const stats = this.mediaExportTelemetry
+    if (!stats) return {}
+    return {
+      mediaDoneFiles: stats.doneFiles,
+      mediaCacheHitFiles: stats.cacheHitFiles,
+      mediaCacheMissFiles: stats.cacheMissFiles,
+      mediaCacheFillFiles: stats.cacheFillFiles,
+      mediaDedupReuseFiles: stats.dedupReuseFiles,
+      mediaBytesWritten: stats.bytesWritten
+    }
+  }
+
+  private noteMediaTelemetry(delta: Partial<MediaExportTelemetry>): void {
+    if (!this.mediaExportTelemetry) return
+    if (Number.isFinite(delta.doneFiles)) {
+      this.mediaExportTelemetry.doneFiles += Math.max(0, Math.floor(Number(delta.doneFiles || 0)))
+    }
+    if (Number.isFinite(delta.cacheHitFiles)) {
+      this.mediaExportTelemetry.cacheHitFiles += Math.max(0, Math.floor(Number(delta.cacheHitFiles || 0)))
+    }
+    if (Number.isFinite(delta.cacheMissFiles)) {
+      this.mediaExportTelemetry.cacheMissFiles += Math.max(0, Math.floor(Number(delta.cacheMissFiles || 0)))
+    }
+    if (Number.isFinite(delta.cacheFillFiles)) {
+      this.mediaExportTelemetry.cacheFillFiles += Math.max(0, Math.floor(Number(delta.cacheFillFiles || 0)))
+    }
+    if (Number.isFinite(delta.dedupReuseFiles)) {
+      this.mediaExportTelemetry.dedupReuseFiles += Math.max(0, Math.floor(Number(delta.dedupReuseFiles || 0)))
+    }
+    if (Number.isFinite(delta.bytesWritten)) {
+      this.mediaExportTelemetry.bytesWritten += Math.max(0, Math.floor(Number(delta.bytesWritten || 0)))
+    }
+  }
+
   private async ensureMediaFileCacheDir(dirPath: string): Promise<void> {
     if (this.mediaFileCacheReadyDirs.has(dirPath)) return
     await fs.promises.mkdir(dirPath, { recursive: true })
@@ -529,6 +616,7 @@ class ExportService {
           await fs.promises.rm(tempPath, { force: true }).catch(() => { })
           throw error
         })
+        this.noteMediaTelemetry({ cacheFillFiles: 1 })
         return cachePath
       } catch {
         return null
@@ -544,15 +632,185 @@ class ExportService {
   private async resolvePreferredMediaSource(
     kind: 'image' | 'video' | 'emoji',
     sourcePath: string
-  ): Promise<string> {
+  ): Promise<MediaSourceResolution> {
     const resolved = await this.resolveMediaFileCachePath(kind, sourcePath)
-    if (!resolved) return sourcePath
+    if (!resolved) {
+      return {
+        sourcePath,
+        cacheHit: false
+      }
+    }
+    const dedupeKey = `${kind}\u001f${resolved.cachePath}`
     if (await this.pathExists(resolved.cachePath)) {
-      return resolved.cachePath
+      return {
+        sourcePath: resolved.cachePath,
+        cacheHit: true,
+        cachePath: resolved.cachePath,
+        fileStat: resolved.fileStat,
+        dedupeKey
+      }
     }
     // 未命中缓存时异步回填，不阻塞当前导出路径
     void this.populateMediaFileCache(kind, sourcePath)
-    return sourcePath
+    return {
+      sourcePath,
+      cacheHit: false,
+      cachePath: resolved.cachePath,
+      fileStat: resolved.fileStat,
+      dedupeKey
+    }
+  }
+
+  private isHardlinkFallbackError(code: string | undefined): boolean {
+    return code === 'EXDEV' || code === 'EPERM' || code === 'EACCES' || code === 'EINVAL' || code === 'ENOSYS' || code === 'ENOTSUP'
+  }
+
+  private async hardlinkOrCopyFile(sourcePath: string, destPath: string): Promise<{ success: boolean; code?: string; linked?: boolean }> {
+    try {
+      await fs.promises.link(sourcePath, destPath)
+      return { success: true, linked: true }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code
+      if (code === 'EEXIST') {
+        return { success: true, linked: true }
+      }
+      if (!this.isHardlinkFallbackError(code)) {
+        return { success: false, code }
+      }
+    }
+
+    const copied = await this.copyFileOptimized(sourcePath, destPath)
+    if (!copied.success) return copied
+    return { success: true, linked: false }
+  }
+
+  private async copyMediaWithCacheAndDedup(
+    kind: 'image' | 'video' | 'emoji',
+    sourcePath: string,
+    destPath: string
+  ): Promise<{ success: boolean; code?: string }> {
+    const resolved = await this.resolvePreferredMediaSource(kind, sourcePath)
+    if (resolved.cacheHit) {
+      this.noteMediaTelemetry({ cacheHitFiles: 1 })
+    } else {
+      this.noteMediaTelemetry({ cacheMissFiles: 1 })
+    }
+
+    const dedupeKey = resolved.dedupeKey
+    if (dedupeKey) {
+      const reusedPath = this.mediaRunSourceDedupMap.get(dedupeKey)
+      if (reusedPath && reusedPath !== destPath && await this.pathExists(reusedPath)) {
+        const reused = await this.hardlinkOrCopyFile(reusedPath, destPath)
+        if (!reused.success) return reused
+        this.noteMediaTelemetry({
+          doneFiles: 1,
+          dedupReuseFiles: 1,
+          bytesWritten: resolved.fileStat?.size || 0
+        })
+        return { success: true }
+      }
+    }
+
+    const copied = resolved.cacheHit
+      ? await this.hardlinkOrCopyFile(resolved.sourcePath, destPath)
+      : await this.copyFileOptimized(resolved.sourcePath, destPath)
+    if (!copied.success) return copied
+
+    if (dedupeKey) {
+      this.mediaRunSourceDedupMap.set(dedupeKey, destPath)
+    }
+    this.noteMediaTelemetry({
+      doneFiles: 1,
+      bytesWritten: resolved.fileStat?.size || 0
+    })
+    return { success: true }
+  }
+
+  private triggerMediaFileCacheCleanup(force = false): void {
+    const now = Date.now()
+    if (!force && now - this.mediaFileCacheLastCleanupAt < this.mediaFileCacheCleanupIntervalMs) return
+    if (this.mediaFileCacheCleanupPending) return
+    this.mediaFileCacheLastCleanupAt = now
+
+    this.mediaFileCacheCleanupPending = this.cleanupMediaFileCache().finally(() => {
+      this.mediaFileCacheCleanupPending = null
+    })
+  }
+
+  private async cleanupMediaFileCache(): Promise<void> {
+    const root = this.getMediaFileCacheRoot()
+    if (!await this.pathExists(root)) return
+    const now = Date.now()
+    const files: Array<{ filePath: string; size: number; mtimeMs: number }> = []
+    const dirs: string[] = []
+
+    const stack = [root]
+    while (stack.length > 0) {
+      const current = stack.pop() as string
+      dirs.push(current)
+      let entries: fs.Dirent[]
+      try {
+        entries = await fs.promises.readdir(current, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        const entryPath = path.join(current, entry.name)
+        if (entry.isDirectory()) {
+          stack.push(entryPath)
+          continue
+        }
+        if (!entry.isFile()) continue
+        try {
+          const stat = await fs.promises.stat(entryPath)
+          if (!stat.isFile()) continue
+          files.push({
+            filePath: entryPath,
+            size: Number.isFinite(stat.size) ? Math.max(0, Math.floor(stat.size)) : 0,
+            mtimeMs: Number.isFinite(stat.mtimeMs) ? Math.max(0, Math.floor(stat.mtimeMs)) : 0
+          })
+        } catch { }
+      }
+    }
+
+    if (files.length === 0) return
+
+    let totalBytes = files.reduce((sum, item) => sum + item.size, 0)
+    let totalFiles = files.length
+    const ttlThreshold = now - this.mediaFileCacheTtlMs
+    const removalSet = new Set<string>()
+
+    for (const item of files) {
+      if (item.mtimeMs > 0 && item.mtimeMs < ttlThreshold) {
+        removalSet.add(item.filePath)
+        totalBytes -= item.size
+        totalFiles -= 1
+      }
+    }
+
+    if (totalBytes > this.mediaFileCacheMaxBytes || totalFiles > this.mediaFileCacheMaxFiles) {
+      const ordered = files
+        .filter((item) => !removalSet.has(item.filePath))
+        .sort((a, b) => a.mtimeMs - b.mtimeMs)
+      for (const item of ordered) {
+        if (totalBytes <= this.mediaFileCacheMaxBytes && totalFiles <= this.mediaFileCacheMaxFiles) break
+        removalSet.add(item.filePath)
+        totalBytes -= item.size
+        totalFiles -= 1
+      }
+    }
+
+    if (removalSet.size === 0) return
+
+    for (const filePath of removalSet) {
+      await fs.promises.rm(filePath, { force: true }).catch(() => { })
+    }
+
+    dirs.sort((a, b) => b.length - a.length)
+    for (const dirPath of dirs) {
+      if (dirPath === root) continue
+      await fs.promises.rmdir(dirPath).catch(() => { })
+    }
   }
 
   private isMediaExportEnabled(options: ExportOptions): boolean {
@@ -2398,6 +2656,7 @@ class ExportService {
       exportVideos?: boolean
       exportEmojis?: boolean
       exportVoiceAsText?: boolean
+      includeVideoPoster?: boolean
       includeVoiceWithTranscript?: boolean
       dirCache?: Set<string>
     }
@@ -2431,7 +2690,14 @@ class ExportService {
     }
 
     if (localType === 43 && options.exportVideos) {
-      return this.exportVideo(msg, sessionId, mediaRootDir, mediaRelativePrefix, options.dirCache)
+      return this.exportVideo(
+        msg,
+        sessionId,
+        mediaRootDir,
+        mediaRelativePrefix,
+        options.dirCache,
+        options.includeVideoPoster === true
+      )
     }
 
     return null
@@ -2510,7 +2776,13 @@ class ExportService {
         const fileName = `${messageId}_${imageKey}${ext}`
         const destPath = path.join(imagesDir, fileName)
 
-        await fs.promises.writeFile(destPath, Buffer.from(base64Data, 'base64'))
+        const buffer = Buffer.from(base64Data, 'base64')
+        await fs.promises.writeFile(destPath, buffer)
+        this.noteMediaTelemetry({
+          doneFiles: 1,
+          cacheMissFiles: 1,
+          bytesWritten: buffer.length
+        })
 
         return {
           relativePath: path.posix.join(mediaRelativePrefix, 'images', fileName),
@@ -2524,8 +2796,7 @@ class ExportService {
       const ext = path.extname(sourcePath) || '.jpg'
       const fileName = `${messageId}_${imageKey}${ext}`
       const destPath = path.join(imagesDir, fileName)
-      const preferredSource = await this.resolvePreferredMediaSource('image', sourcePath)
-      const copied = await this.copyFileOptimized(preferredSource, destPath)
+      const copied = await this.copyMediaWithCacheAndDedup('image', sourcePath, destPath)
       if (!copied.success) {
         if (copied.code === 'ENOENT') {
           console.log(`[Export] 源图片文件不存在 (localId=${msg.localId}): ${sourcePath} → 将显示 [图片] 占位符`)
@@ -2692,6 +2963,10 @@ class ExportService {
       // voiceResult.data 是 base64 编码的 wav 数据
       const wavBuffer = Buffer.from(voiceResult.data, 'base64')
       await fs.promises.writeFile(destPath, wavBuffer)
+      this.noteMediaTelemetry({
+        doneFiles: 1,
+        bytesWritten: wavBuffer.length
+      })
 
       return {
         relativePath: path.posix.join(mediaRelativePrefix, 'voices', fileName),
@@ -2746,8 +3021,7 @@ class ExportService {
       const key = msg.emojiMd5 || String(msg.localId)
       const fileName = `${key}${ext}`
       const destPath = path.join(emojisDir, fileName)
-      const preferredSource = await this.resolvePreferredMediaSource('emoji', localPath)
-      const copied = await this.copyFileOptimized(preferredSource, destPath)
+      const copied = await this.copyMediaWithCacheAndDedup('emoji', localPath, destPath)
       if (!copied.success) return null
 
       return {
@@ -2768,7 +3042,8 @@ class ExportService {
     sessionId: string,
     mediaRootDir: string,
     mediaRelativePrefix: string,
-    dirCache?: Set<string>
+    dirCache?: Set<string>,
+    includePoster = false
   ): Promise<MediaExportItem | null> {
     try {
       const videoMd5 = msg.videoMd5
@@ -2780,7 +3055,7 @@ class ExportService {
         dirCache?.add(videosDir)
       }
 
-      const videoInfo = await videoService.getVideoInfo(videoMd5)
+      const videoInfo = await videoService.getVideoInfo(videoMd5, { includePoster })
       if (!videoInfo.exists || !videoInfo.videoUrl) {
         return null
       }
@@ -2789,14 +3064,13 @@ class ExportService {
       const fileName = path.basename(sourcePath)
       const destPath = path.join(videosDir, fileName)
 
-      const preferredSource = await this.resolvePreferredMediaSource('video', sourcePath)
-      const copied = await this.copyFileOptimized(preferredSource, destPath)
+      const copied = await this.copyMediaWithCacheAndDedup('video', sourcePath, destPath)
       if (!copied.success) return null
 
       return {
         relativePath: path.posix.join(mediaRelativePrefix, 'videos', fileName),
         kind: 'video',
-        posterDataUrl: videoInfo.coverUrl || videoInfo.thumbUrl
+        posterDataUrl: includePoster ? (videoInfo.coverUrl || videoInfo.thumbUrl) : undefined
       }
     } catch (e) {
       return null
@@ -3854,6 +4128,7 @@ class ExportService {
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
           phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
 
@@ -3870,6 +4145,7 @@ class ExportService {
               exportVideos: options.exportVideos,
               exportEmojis: options.exportEmojis,
               exportVoiceAsText: options.exportVoiceAsText,
+              includeVideoPoster: options.format === 'html',
               dirCache: mediaDirCache
             })
             mediaCache.set(mediaKey, mediaItem)
@@ -3883,7 +4159,8 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`
+              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              ...this.getMediaTelemetrySnapshot()
             })
           }
         })
@@ -4341,6 +4618,7 @@ class ExportService {
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
           phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
 
@@ -4356,6 +4634,7 @@ class ExportService {
               exportVideos: options.exportVideos,
               exportEmojis: options.exportEmojis,
               exportVoiceAsText: options.exportVoiceAsText,
+              includeVideoPoster: options.format === 'html',
               dirCache: mediaDirCache
             })
             mediaCache.set(mediaKey, mediaItem)
@@ -4369,7 +4648,8 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`
+              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              ...this.getMediaTelemetrySnapshot()
             })
           }
         })
@@ -5152,6 +5432,7 @@ class ExportService {
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
           phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
 
@@ -5167,6 +5448,7 @@ class ExportService {
               exportVideos: options.exportVideos,
               exportEmojis: options.exportEmojis,
               exportVoiceAsText: options.exportVoiceAsText,
+              includeVideoPoster: options.format === 'html',
               dirCache: mediaDirCache
             })
             mediaCache.set(mediaKey, mediaItem)
@@ -5180,7 +5462,8 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`
+              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              ...this.getMediaTelemetrySnapshot()
             })
           }
         })
@@ -5822,6 +6105,7 @@ class ExportService {
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
           phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
 
@@ -5837,6 +6121,7 @@ class ExportService {
               exportVideos: options.exportVideos,
               exportEmojis: options.exportEmojis,
               exportVoiceAsText: options.exportVoiceAsText,
+              includeVideoPoster: options.format === 'html',
               dirCache: mediaDirCache
             })
             mediaCache.set(mediaKey, mediaItem)
@@ -5850,7 +6135,8 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`
+              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              ...this.getMediaTelemetrySnapshot()
             })
           }
         })
@@ -6164,6 +6450,7 @@ class ExportService {
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
           phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
 
@@ -6178,7 +6465,9 @@ class ExportService {
               exportVoices: options.exportVoices,
               exportVideos: options.exportVideos,
               exportEmojis: options.exportEmojis,
-              exportVoiceAsText: options.exportVoiceAsText
+              exportVoiceAsText: options.exportVoiceAsText,
+              includeVideoPoster: options.format === 'html',
+              dirCache: mediaDirCache
             })
             mediaCache.set(mediaKey, mediaItem)
           }
@@ -6191,7 +6480,8 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`
+              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              ...this.getMediaTelemetrySnapshot()
             })
           }
         })
@@ -6574,6 +6864,7 @@ class ExportService {
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
           phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
 
@@ -6588,6 +6879,7 @@ class ExportService {
               exportVoices: options.exportVoices,
               exportEmojis: options.exportEmojis,
               exportVoiceAsText: options.exportVoiceAsText,
+              includeVideoPoster: options.format === 'html',
               includeVoiceWithTranscript: true,
               exportVideos: options.exportVideos,
               dirCache: mediaDirCache
@@ -6603,7 +6895,8 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`
+              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              ...this.getMediaTelemetrySnapshot()
             })
           }
         })
@@ -7276,8 +7569,12 @@ class ExportService {
     const successSessionIds: string[] = []
     const failedSessionIds: string[] = []
     const progressEmitter = this.createProgressEmitter(onProgress)
+    let attachMediaTelemetry = false
     const emitProgress = (progress: ExportProgress, options?: { force?: boolean }) => {
-      progressEmitter.emit(progress, options)
+      const payload = attachMediaTelemetry
+        ? { ...progress, ...this.getMediaTelemetrySnapshot() }
+        : progress
+      progressEmitter.emit(payload, options)
     }
 
     try {
@@ -7286,12 +7583,17 @@ class ExportService {
         return { success: false, successCount: 0, failCount: sessionIds.length, error: conn.error }
       }
 
+      this.resetMediaRuntimeState()
       const effectiveOptions: ExportOptions = this.isMediaContentBatchExport(options)
         ? { ...options, exportVoiceAsText: false }
         : options
 
       const exportMediaEnabled = effectiveOptions.exportMedia === true &&
         Boolean(effectiveOptions.exportImages || effectiveOptions.exportVoices || effectiveOptions.exportVideos || effectiveOptions.exportEmojis)
+      attachMediaTelemetry = exportMediaEnabled
+      if (exportMediaEnabled) {
+        this.triggerMediaFileCacheCleanup()
+      }
       const rawWriteLayout = this.configService.get('exportWriteLayout')
       const writeLayout = rawWriteLayout === 'A' || rawWriteLayout === 'B' || rawWriteLayout === 'C'
         ? rawWriteLayout
@@ -7745,6 +8047,8 @@ class ExportService {
     } catch (e) {
       progressEmitter.flush()
       return { success: false, successCount, failCount, error: String(e) }
+    } finally {
+      this.clearMediaRuntimeState()
     }
   }
 }

@@ -1249,25 +1249,18 @@ export class WcdbCore {
     }
   }
 
-  private preserveInt64FieldsInJson(jsonStr: string, fieldNames: string[]): string {
-    let normalized = String(jsonStr || '')
-    for (const fieldName of fieldNames) {
-      const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const pattern = new RegExp(`("${escaped}"\\s*:\\s*)(-?\\d{16,})`, 'g')
-      normalized = normalized.replace(pattern, '$1"$2"')
-    }
-    return normalized
-  }
-
   private parseMessageJson(jsonStr: string): any {
-    const normalized = this.preserveInt64FieldsInJson(jsonStr, [
-      'server_id',
-      'serverId',
-      'ServerId',
-      'msg_server_id',
-      'msgServerId',
-      'MsgServerId'
-    ])
+    const raw = String(jsonStr || '')
+    if (!raw) return []
+    // 热路径优化：仅在检测到 16+ 位整数字段时才进行字符串包裹，避免每批次多轮全量 replace。
+    const needsInt64Normalize = /"(?:server_id|serverId|ServerId|msg_server_id|msgServerId|MsgServerId)"\s*:\s*-?\d{16,}/.test(raw)
+    if (!needsInt64Normalize) {
+      return JSON.parse(raw)
+    }
+    const normalized = raw.replace(
+      /("(?:server_id|serverId|ServerId|msg_server_id|msgServerId|MsgServerId)"\s*:\s*)(-?\d{16,})/g,
+      '$1"$2"'
+    )
     return JSON.parse(normalized)
   }
 

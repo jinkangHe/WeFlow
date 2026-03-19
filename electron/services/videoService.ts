@@ -355,7 +355,7 @@ class VideoService {
     return index
   }
 
-  private getVideoInfoFromIndex(index: Map<string, VideoIndexEntry>, md5: string): VideoInfo | null {
+  private getVideoInfoFromIndex(index: Map<string, VideoIndexEntry>, md5: string, includePoster = true): VideoInfo | null {
     const normalizedMd5 = String(md5 || '').trim().toLowerCase()
     if (!normalizedMd5) return null
 
@@ -371,6 +371,12 @@ class VideoService {
       const entry = index.get(key)
       if (!entry?.videoPath) continue
       if (!existsSync(entry.videoPath)) continue
+      if (!includePoster) {
+        return {
+          videoUrl: entry.videoPath,
+          exists: true
+        }
+      }
       return {
         videoUrl: entry.videoPath,
         coverUrl: this.fileToDataUrl(entry.coverPath, 'image/jpeg'),
@@ -382,7 +388,7 @@ class VideoService {
     return null
   }
 
-  private fallbackScanVideo(videoBaseDir: string, realVideoMd5: string): VideoInfo | null {
+  private fallbackScanVideo(videoBaseDir: string, realVideoMd5: string, includePoster = true): VideoInfo | null {
     try {
       const yearMonthDirs = readdirSync(videoBaseDir)
         .filter((dir) => {
@@ -399,6 +405,12 @@ class VideoService {
         const dirPath = join(videoBaseDir, yearMonth)
         const videoPath = join(dirPath, `${realVideoMd5}.mp4`)
         if (!existsSync(videoPath)) continue
+        if (!includePoster) {
+          return {
+            videoUrl: videoPath,
+            exists: true
+          }
+        }
         const baseMd5 = realVideoMd5.replace(/_raw$/, '')
         const coverPath = join(dirPath, `${baseMd5}.jpg`)
         const thumbPath = join(dirPath, `${baseMd5}_thumb.jpg`)
@@ -420,8 +432,9 @@ class VideoService {
    * 视频存放在: {数据库根目录}/{用户wxid}/msg/video/{年月}/
    * 文件命名: {md5}.mp4, {md5}.jpg, {md5}_thumb.jpg
    */
-  async getVideoInfo(videoMd5: string): Promise<VideoInfo> {
+  async getVideoInfo(videoMd5: string, options?: { includePoster?: boolean }): Promise<VideoInfo> {
     const normalizedMd5 = String(videoMd5 || '').trim().toLowerCase()
+    const includePoster = options?.includePoster !== false
     const dbPath = this.getDbPath()
     const wxid = this.getMyWxid()
 
@@ -433,7 +446,7 @@ class VideoService {
     }
 
     const scopeKey = this.getScopeKey(dbPath, wxid)
-    const cacheKey = `${scopeKey}|${normalizedMd5}`
+    const cacheKey = `${scopeKey}|${normalizedMd5}|poster=${includePoster ? 1 : 0}`
 
     const cachedInfo = this.readTimedCache(this.videoInfoCache, cacheKey)
     if (cachedInfo) return cachedInfo
@@ -452,13 +465,13 @@ class VideoService {
       }
 
       const index = this.getOrBuildVideoIndex(videoBaseDir)
-      const indexed = this.getVideoInfoFromIndex(index, realVideoMd5)
+      const indexed = this.getVideoInfoFromIndex(index, realVideoMd5, includePoster)
       if (indexed) {
         this.writeTimedCache(this.videoInfoCache, cacheKey, indexed, this.videoInfoCacheTtlMs, this.maxCacheEntries)
         return indexed
       }
 
-      const fallback = this.fallbackScanVideo(videoBaseDir, realVideoMd5)
+      const fallback = this.fallbackScanVideo(videoBaseDir, realVideoMd5, includePoster)
       if (fallback) {
         this.writeTimedCache(this.videoInfoCache, cacheKey, fallback, this.videoInfoCacheTtlMs, this.maxCacheEntries)
         return fallback

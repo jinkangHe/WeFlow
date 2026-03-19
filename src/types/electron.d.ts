@@ -865,6 +865,12 @@ export interface ExportProgress {
   exportedMessages?: number
   estimatedTotalMessages?: number
   writtenFiles?: number
+  mediaDoneFiles?: number
+  mediaCacheHitFiles?: number
+  mediaCacheMissFiles?: number
+  mediaCacheFillFiles?: number
+  mediaDedupReuseFiles?: number
+  mediaBytesWritten?: number
 }
 
 export interface WxidInfo {
