@@ -688,8 +688,16 @@ export class ConfigService {
     }
   }
 
+  private getUserDataPath(): string {
+    const workerUserDataPath = String(process.env.WEFLOW_USER_DATA_PATH || process.env.WEFLOW_CONFIG_CWD || '').trim()
+    if (workerUserDataPath) {
+      return workerUserDataPath
+    }
+    return app?.getPath?.('userData') || process.cwd()
+  }
+
   getCacheBasePath(): string {
-    return join(app.getPath('userData'), 'cache')
+    return join(this.getUserDataPath(), 'cache')
   }
 
   getAll(): Partial<ConfigSchema> {

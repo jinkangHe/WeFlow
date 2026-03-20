@@ -176,6 +176,8 @@ export default function SnsPage() {
     const selectedContactUsernamesRef = useRef<string[]>(selectedContactUsernames)
     const cacheScopeKeyRef = useRef('')
     const snsUserPostCountsCacheScopeKeyRef = useRef('')
+    const activeContactsLoadTaskIdRef = useRef<string | null>(null)
+    const activeContactsCountTaskIdRef = useRef<string | null>(null)
     const scrollAdjustmentRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
     const pendingResetFeedRef = useRef(false)
     const contactsLoadTokenRef = useRef(0)
@@ -750,6 +752,12 @@ export default function SnsPage() {
             window.clearTimeout(contactsCountBatchTimerRef.current)
             contactsCountBatchTimerRef.current = null
         }
+        if (activeContactsCountTaskIdRef.current) {
+            finishBackgroundTask(activeContactsCountTaskIdRef.current, 'canceled', {
+                detail: '已停止后续联系人朋友圈条数补算'
+            })
+            activeContactsCountTaskIdRef.current = null
+        }
         if (resetProgress) {
             setContactsCountProgress({
                 resolved: 0,
@@ -814,31 +822,56 @@ export default function SnsPage() {
             cancelable: true
         })
 
+        activeContactsCountTaskIdRef.current = taskId
         let normalizedCounts: Record<string, number> = {}
         try {
             const result = await window.electronAPI.sns.getUserPostCounts()
             if (isBackgroundTaskCancelRequested(taskId)) {
+                if (activeContactsCountTaskIdRef.current === taskId) {
+                    activeContactsCountTaskIdRef.current = null
+                }
                 finishBackgroundTask(taskId, 'canceled', {
                     detail: '已停止后续加载，当前计数查询结束后不再继续分批写入'
                 })
                 return
             }
-            if (runToken !== contactsCountHydrationTokenRef.current) return
+            if (runToken !== contactsCountHydrationTokenRef.current) {
+                if (activeContactsCountTaskIdRef.current === taskId) {
+                    activeContactsCountTaskIdRef.current = null
+                }
+                finishBackgroundTask(taskId, 'canceled', {
+                    detail: '页面状态已刷新，本次联系人朋友圈条数补算已过期'
+                })
+                return
+            }
             if (result.success && result.counts) {
-                normalizedCounts = Object.fromEntries(
-                    Object.entries(result.counts).map(([username, value]) => [username, normalizePostCount(value)])
-                )
+                normalizedCounts = pendingTargets.reduce<Record<string, number>>((acc, username) => {
+                    acc[username] = normalizePostCount(result.counts?.[username])
+                    return acc
+                }, {})
                 void (async () => {
                     try {
                         const scopeKey = await ensureSnsUserPostCountsCacheScopeKey()
-                        await configService.setExportSnsUserPostCountsCache(scopeKey, normalizedCounts)
+                        const currentCache = await configService.getExportSnsUserPostCountsCache(scopeKey)
+                        await configService.setExportSnsUserPostCountsCache(scopeKey, {
+                            ...(currentCache?.counts || {}),
+                            ...normalizedCounts
+                        })
                     } catch (cacheError) {
                         console.error('Failed to persist SNS user post counts cache:', cacheError)
                     }
                 })()
+            } else {
+                normalizedCounts = pendingTargets.reduce<Record<string, number>>((acc, username) => {
+                    acc[username] = 0
+                    return acc
+                }, {})
             }
         } catch (error) {
             console.error('Failed to load contact post counts:', error)
+            if (activeContactsCountTaskIdRef.current === taskId) {
+                activeContactsCountTaskIdRef.current = null
+            }
             finishBackgroundTask(taskId, 'failed', {
                 detail: String(error)
             })
@@ -848,8 +881,19 @@ export default function SnsPage() {
         let resolved = preResolved
         let cursor = 0
         const applyBatch = () => {
-            if (runToken !== contactsCountHydrationTokenRef.current) return
+            if (runToken !== contactsCountHydrationTokenRef.current) {
+                if (activeContactsCountTaskIdRef.current === taskId) {
+                    activeContactsCountTaskIdRef.current = null
+                }
+                finishBackgroundTask(taskId, 'canceled', {
+                    detail: '页面状态已刷新，本次联系人朋友圈条数补算已过期'
+                })
+                return
+            }
             if (isBackgroundTaskCancelRequested(taskId)) {
+                if (activeContactsCountTaskIdRef.current === taskId) {
+                    activeContactsCountTaskIdRef.current = null
+                }
                 finishBackgroundTask(taskId, 'canceled', {
                     detail: `已停止后续加载，已完成 ${resolved}/${totalTargets}`
                 })
@@ -870,6 +914,9 @@ export default function SnsPage() {
                     running: false
                 })
                 contactsCountBatchTimerRef.current = null
+                if (activeContactsCountTaskIdRef.current === taskId) {
+                    activeContactsCountTaskIdRef.current = null
+                }
                 finishBackgroundTask(taskId, 'completed', {
                     detail: '联系人朋友圈条数补算完成',
                     progressText: `${totalTargets}/${totalTargets}`
@@ -910,6 +957,18 @@ export default function SnsPage() {
                 contactsCountBatchTimerRef.current = window.setTimeout(applyBatch, CONTACT_COUNT_SORT_DEBOUNCE_MS)
             } else {
                 contactsCountBatchTimerRef.current = null
+                setContactsCountProgress({
+                    resolved: totalTargets,
+                    total: totalTargets,
+                    running: false
+                })
+                if (activeContactsCountTaskIdRef.current === taskId) {
+                    activeContactsCountTaskIdRef.current = null
+                }
+                finishBackgroundTask(taskId, 'completed', {
+                    detail: '鑱旂郴浜烘湅鍙嬪湀鏉℃暟琛ョ畻瀹屾垚',
+                    progressText: `${totalTargets}/${totalTargets}`
+                })
             }
         }
 
@@ -918,6 +977,12 @@ export default function SnsPage() {
 
     // Load Contacts（先按最近会话显示联系人，再异步统计朋友圈条数并增量排序）
     const loadContacts = useCallback(async () => {
+        if (activeContactsLoadTaskIdRef.current) {
+            finishBackgroundTask(activeContactsLoadTaskIdRef.current, 'canceled', {
+                detail: '新一轮联系人列表加载已开始，旧任务已取消'
+            })
+            activeContactsLoadTaskIdRef.current = null
+        }
         const requestToken = ++contactsLoadTokenRef.current
         const taskId = registerBackgroundTask({
             sourcePage: 'sns',
@@ -926,6 +991,7 @@ export default function SnsPage() {
             progressText: '初始化',
             cancelable: true
         })
+        activeContactsLoadTaskIdRef.current = taskId
         stopContactsCountHydration(true)
         setContactsLoading(true)
         try {
@@ -955,7 +1021,15 @@ export default function SnsPage() {
                     }
                 })
 
-            if (requestToken !== contactsLoadTokenRef.current) return
+            if (requestToken !== contactsLoadTokenRef.current) {
+                if (activeContactsLoadTaskIdRef.current === taskId) {
+                    activeContactsLoadTaskIdRef.current = null
+                }
+                finishBackgroundTask(taskId, 'canceled', {
+                    detail: '页面状态已刷新，本次联系人列表加载已过期'
+                })
+                return
+            }
             if (cachedContacts.length > 0) {
                 const cachedContactsSorted = sortContactsForRanking(cachedContacts)
                 setContacts(cachedContactsSorted)
@@ -977,6 +1051,9 @@ export default function SnsPage() {
                 window.electronAPI.chat.getSessions()
             ])
             if (isBackgroundTaskCancelRequested(taskId)) {
+                if (activeContactsLoadTaskIdRef.current === taskId) {
+                    activeContactsLoadTaskIdRef.current = null
+                }
                 finishBackgroundTask(taskId, 'canceled', {
                     detail: '已停止后续加载，当前联系人查询结束后未继续补齐'
                 })
@@ -1021,7 +1098,15 @@ export default function SnsPage() {
             }
 
             let contactsList = sortContactsForRanking(Array.from(contactMap.values()))
-            if (requestToken !== contactsLoadTokenRef.current) return
+            if (requestToken !== contactsLoadTokenRef.current) {
+                if (activeContactsLoadTaskIdRef.current === taskId) {
+                    activeContactsLoadTaskIdRef.current = null
+                }
+                finishBackgroundTask(taskId, 'canceled', {
+                    detail: '页面状态已刷新，本次联系人列表加载已过期'
+                })
+                return
+            }
             setContacts(contactsList)
             const readyUsernames = new Set(
                 contactsList
@@ -1043,6 +1128,9 @@ export default function SnsPage() {
                 })
                 const enriched = await window.electronAPI.chat.enrichSessionsContactInfo(allUsernames)
                 if (isBackgroundTaskCancelRequested(taskId)) {
+                    if (activeContactsLoadTaskIdRef.current === taskId) {
+                        activeContactsLoadTaskIdRef.current = null
+                    }
                     finishBackgroundTask(taskId, 'canceled', {
                         detail: '已停止后续加载，联系人补齐未继续写入'
                     })
@@ -1058,7 +1146,15 @@ export default function SnsPage() {
                             avatarUrl: extra.avatarUrl || contact.avatarUrl
                         }
                     })
-                    if (requestToken !== contactsLoadTokenRef.current) return
+                    if (requestToken !== contactsLoadTokenRef.current) {
+                        if (activeContactsLoadTaskIdRef.current === taskId) {
+                            activeContactsLoadTaskIdRef.current = null
+                        }
+                        finishBackgroundTask(taskId, 'canceled', {
+                            detail: '页面状态已刷新，本次联系人列表加载已过期'
+                        })
+                        return
+                    }
                     setContacts((prev) => {
                         const prevMap = new Map(prev.map((contact) => [contact.username, contact]))
                         const merged = contactsList.map((contact) => {
@@ -1074,18 +1170,35 @@ export default function SnsPage() {
                     })
                 }
             }
+            if (activeContactsLoadTaskIdRef.current === taskId) {
+                activeContactsLoadTaskIdRef.current = null
+            }
             finishBackgroundTask(taskId, 'completed', {
                 detail: `朋友圈联系人列表加载完成，共 ${contactsList.length} 人`,
                 progressText: `${contactsList.length} 人`
             })
         } catch (error) {
-            if (requestToken !== contactsLoadTokenRef.current) return
+            if (requestToken !== contactsLoadTokenRef.current) {
+                if (activeContactsLoadTaskIdRef.current === taskId) {
+                    activeContactsLoadTaskIdRef.current = null
+                }
+                finishBackgroundTask(taskId, 'canceled', {
+                    detail: '页面状态已刷新，本次联系人列表加载已过期'
+                })
+                return
+            }
             console.error('Failed to load contacts:', error)
             stopContactsCountHydration(true)
+            if (activeContactsLoadTaskIdRef.current === taskId) {
+                activeContactsLoadTaskIdRef.current = null
+            }
             finishBackgroundTask(taskId, 'failed', {
                 detail: String(error)
             })
         } finally {
+            if (activeContactsLoadTaskIdRef.current === taskId && requestToken !== contactsLoadTokenRef.current) {
+                activeContactsLoadTaskIdRef.current = null
+            }
             if (requestToken === contactsLoadTokenRef.current) {
                 setContactsLoading(false)
             }
@@ -1184,6 +1297,18 @@ export default function SnsPage() {
             if (contactsCountBatchTimerRef.current) {
                 window.clearTimeout(contactsCountBatchTimerRef.current)
                 contactsCountBatchTimerRef.current = null
+            }
+            if (activeContactsCountTaskIdRef.current) {
+                finishBackgroundTask(activeContactsCountTaskIdRef.current, 'canceled', {
+                    detail: '已离开朋友圈页，联系人朋友圈条数补算已取消'
+                })
+                activeContactsCountTaskIdRef.current = null
+            }
+            if (activeContactsLoadTaskIdRef.current) {
+                finishBackgroundTask(activeContactsLoadTaskIdRef.current, 'canceled', {
+                    detail: '已离开朋友圈页，联系人列表加载已取消'
+                })
+                activeContactsLoadTaskIdRef.current = null
             }
         }
     }, [])

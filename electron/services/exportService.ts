@@ -46,6 +46,8 @@ interface ChatLabMessage {
   timestamp: number
   type: number
   content: string | null
+  platformMessageId?: string
+  replyToMessageId?: string
   chatRecords?: any[]  // 嵌套的聊天记录
 }
 
@@ -952,6 +954,18 @@ class ExportService {
     return fallback
   }
 
+  private getRowField(row: Record<string, any>, keys: string[]): any {
+    for (const key of keys) {
+      if (row && Object.prototype.hasOwnProperty.call(row, key)) {
+        const value = row[key]
+        if (value !== undefined && value !== null && value !== '') {
+          return value
+        }
+      }
+    }
+    return undefined
+  }
+
   private normalizeUnsignedIntToken(value: unknown): string {
     const raw = String(value ?? '').trim()
     if (!raw) return '0'
@@ -963,14 +977,14 @@ class ExportService {
     return String(Math.floor(num))
   }
 
-  private getStableMessageKey(msg: { localId?: unknown; createTime?: unknown; serverId?: unknown }): string {
+  private getStableMessageKey(msg: { localId?: unknown; createTime?: unknown; serverId?: unknown; serverIdRaw?: unknown }): string {
     const localId = this.normalizeUnsignedIntToken(msg?.localId)
     const createTime = this.normalizeUnsignedIntToken(msg?.createTime)
-    const serverId = this.normalizeUnsignedIntToken(msg?.serverId)
+    const serverId = this.normalizeUnsignedIntToken(msg?.serverIdRaw ?? msg?.serverId)
     return `${localId}:${createTime}:${serverId}`
   }
 
-  private getMediaCacheKey(msg: { localType?: unknown; localId?: unknown; createTime?: unknown; serverId?: unknown }): string {
+  private getMediaCacheKey(msg: { localType?: unknown; localId?: unknown; createTime?: unknown; serverId?: unknown; serverIdRaw?: unknown }): string {
     const localType = this.normalizeUnsignedIntToken(msg?.localType)
     return `${localType}_${this.getStableMessageKey(msg)}`
   }
@@ -1620,7 +1634,13 @@ class ExportService {
         if (type === '6') return title ? `[文件] ${title}` : '[文件]'
         if (type === '19') return this.formatForwardChatRecordContent(normalizedContent)
         if (type === '33' || type === '36') return title ? `[小程序] ${title}` : '[小程序]'
-        if (type === '57') return title || '[引用消息]'
+        if (type === '57') {
+          const quoteDisplay = this.extractQuotedReplyDisplay(content)
+          if (quoteDisplay) {
+            return this.buildQuotedReplyText(quoteDisplay)
+          }
+          return title || '[引用消息]'
+        }
         if (type === '5' || type === '49') return title ? `[链接] ${title}` : '[链接]'
         return title ? `[链接] ${title}` : '[链接]'
       }
@@ -1629,6 +1649,10 @@ class ExportService {
       case 266287972401: return this.cleanSystemMessage(content)  // 拍一拍
       case 244813135921: {
         // 引用消息
+        const quoteDisplay = this.extractQuotedReplyDisplay(content)
+        if (quoteDisplay) {
+          return this.buildQuotedReplyText(quoteDisplay)
+        }
         const title = this.extractXmlValue(content, 'title')
         return title || '[引用消息]'
       }
@@ -1662,7 +1686,13 @@ class ExportService {
           if (xmlType === '6') return title ? `[文件] ${title}` : '[文件]'
           if (xmlType === '19') return this.formatForwardChatRecordContent(normalizedContent)
           if (xmlType === '33' || xmlType === '36') return title ? `[小程序] ${title}` : '[小程序]'
-          if (xmlType === '57') return title || '[引用消息]'
+          if (xmlType === '57') {
+            const quoteDisplay = this.extractQuotedReplyDisplay(content)
+            if (quoteDisplay) {
+              return this.buildQuotedReplyText(quoteDisplay)
+            }
+            return title || '[引用消息]'
+          }
           if (xmlType === '5' || xmlType === '49') return title ? `[链接] ${title}` : '[链接]'
 
           // 有 title 就返回 title
@@ -1787,6 +1817,10 @@ class ExportService {
         return `[小程序]${appName}`
       }
       if (subType === 57) {
+        const quoteDisplay = this.extractQuotedReplyDisplay(safeContent)
+        if (quoteDisplay) {
+          return this.buildQuotedReplyText(quoteDisplay)
+        }
         return title || '[引用消息]'
       }
       if (title) {
@@ -1796,6 +1830,161 @@ class ExportService {
     }
 
     return '[其他消息]'
+  }
+
+  private formatQuotedReferencePreview(content: string, type?: string): string {
+    const safeContent = content || ''
+    const referType = Number.parseInt(String(type || ''), 10)
+    if (!Number.isFinite(referType)) {
+      const sanitized = this.sanitizeQuotedContent(safeContent)
+      return sanitized || '[消息]'
+    }
+
+    if (referType === 49) {
+      const normalized = this.normalizeAppMessageContent(safeContent)
+      const title =
+        this.extractXmlValue(normalized, 'title') ||
+        this.extractXmlValue(normalized, 'filename') ||
+        this.extractXmlValue(normalized, 'appname')
+      if (title) return this.stripSenderPrefix(title)
+
+      const subTypeRaw = this.extractAppMessageType(normalized)
+      const subType = subTypeRaw ? parseInt(subTypeRaw, 10) : 0
+      if (subType === 6) return '[文件]'
+      if (subType === 19) return '[聊天记录]'
+      if (subType === 33 || subType === 36) return '[小程序]'
+      return '[链接]'
+    }
+
+    return this.formatPlainExportContent(safeContent, referType, { exportVoiceAsText: false }) || '[消息]'
+  }
+
+  private resolveQuotedSenderUsername(fromusr?: string, chatusr?: string): string {
+    const normalizedChatUsr = String(chatusr || '').trim()
+    const normalizedFromUsr = String(fromusr || '').trim()
+
+    if (normalizedChatUsr) {
+      return normalizedChatUsr
+    }
+
+    if (normalizedFromUsr.endsWith('@chatroom')) {
+      return ''
+    }
+
+    return normalizedFromUsr
+  }
+
+  private buildQuotedReplyText(display: {
+    replyText: string
+    quotedSender?: string
+    quotedPreview: string
+  }): string {
+    const quoteLabel = display.quotedSender
+      ? `${display.quotedSender}：${display.quotedPreview}`
+      : display.quotedPreview
+    if (display.replyText) {
+      return `${display.replyText}[引用 ${quoteLabel}]`
+    }
+    return `[引用 ${quoteLabel}]`
+  }
+
+  private extractQuotedReplyDisplay(content: string): {
+    replyText: string
+    quotedSender?: string
+    quotedPreview: string
+  } | null {
+    try {
+      const normalized = this.normalizeAppMessageContent(content || '')
+      const referMsgStart = normalized.indexOf('<refermsg>')
+      const referMsgEnd = normalized.indexOf('</refermsg>')
+      if (referMsgStart === -1 || referMsgEnd === -1) {
+        return null
+      }
+
+      const referMsgXml = normalized.substring(referMsgStart, referMsgEnd + 11)
+      const quoteInfo = this.parseQuoteMessage(normalized)
+      const replyText = this.stripSenderPrefix(this.extractXmlValue(normalized, 'title') || '')
+      const quotedPreview = this.formatQuotedReferencePreview(
+        this.extractXmlValue(referMsgXml, 'content'),
+        this.extractXmlValue(referMsgXml, 'type')
+      )
+
+      if (!replyText && !quotedPreview) {
+        return null
+      }
+
+      return {
+        replyText,
+        quotedSender: quoteInfo.sender || undefined,
+        quotedPreview: quotedPreview || '[消息]'
+      }
+    } catch {
+      return null
+    }
+  }
+
+  private isQuotedReplyMessage(localType: number, content: string): boolean {
+    if (localType === 244813135921) return true
+    const normalized = this.normalizeAppMessageContent(content || '')
+    if (!(localType === 49 || normalized.includes('<appmsg') || normalized.includes('<msg>'))) {
+      return false
+    }
+    const subType = this.extractAppMessageType(normalized)
+    return subType === '57' || normalized.includes('<refermsg>')
+  }
+
+  private async resolveQuotedReplyDisplayWithNames(args: {
+    content: string
+    isGroup: boolean
+    displayNamePreference: ExportOptions['displayNamePreference']
+    getContact: (username: string) => Promise<{ success: boolean; contact?: any; error?: string }>
+    groupNicknamesMap: Map<string, string>
+    cleanedMyWxid: string
+    rawMyWxid?: string
+    myDisplayName?: string
+  }): Promise<{
+    replyText: string
+    quotedSender?: string
+    quotedPreview: string
+  } | null> {
+    const base = this.extractQuotedReplyDisplay(args.content)
+    if (!base) return null
+    if (base.quotedSender) return base
+
+    const normalized = this.normalizeAppMessageContent(args.content || '')
+    const referMsgStart = normalized.indexOf('<refermsg>')
+    const referMsgEnd = normalized.indexOf('</refermsg>')
+    if (referMsgStart === -1 || referMsgEnd === -1) {
+      return base
+    }
+
+    const referMsgXml = normalized.substring(referMsgStart, referMsgEnd + 11)
+    const quotedSenderUsername = this.resolveQuotedSenderUsername(
+      this.extractXmlValue(referMsgXml, 'fromusr'),
+      this.extractXmlValue(referMsgXml, 'chatusr')
+    )
+    if (!quotedSenderUsername) {
+      return base
+    }
+
+    const isQuotedSelf = this.isSameWxid(quotedSenderUsername, args.cleanedMyWxid)
+    const fallbackDisplayName = isQuotedSelf
+      ? (args.myDisplayName || quotedSenderUsername)
+      : quotedSenderUsername
+
+    const profile = await this.resolveExportDisplayProfile(
+      quotedSenderUsername,
+      args.displayNamePreference,
+      args.getContact,
+      args.groupNicknamesMap,
+      fallbackDisplayName,
+      isQuotedSelf ? [args.rawMyWxid, args.cleanedMyWxid] : []
+    )
+
+    return {
+      ...base,
+      quotedSender: profile.displayName || fallbackDisplayName || base.quotedSender
+    }
   }
 
   private parseDurationSeconds(value: string): number | null {
@@ -2460,6 +2649,32 @@ class ExportService {
     } catch {
       return {}
     }
+  }
+
+  private extractChatLabReplyToMessageId(content: string): string | undefined {
+    try {
+      const normalized = this.normalizeAppMessageContent(content || '')
+      const referMsgStart = normalized.indexOf('<refermsg>')
+      const referMsgEnd = normalized.indexOf('</refermsg>')
+      if (referMsgStart === -1 || referMsgEnd === -1) {
+        return undefined
+      }
+
+      const referMsgXml = normalized.substring(referMsgStart, referMsgEnd + 11)
+      const replyToMessageIdRaw = this.normalizeUnsignedIntToken(this.extractXmlValue(referMsgXml, 'svrid'))
+      return replyToMessageIdRaw !== '0' ? replyToMessageIdRaw : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  private getExportPlatformMessageId(msg: { serverIdRaw?: unknown; serverId?: unknown }): string | undefined {
+    const value = this.normalizeUnsignedIntToken(msg.serverIdRaw ?? msg.serverId)
+    return value !== '0' ? value : undefined
+  }
+
+  private getExportReplyToMessageId(content: string): string | undefined {
+    return this.extractChatLabReplyToMessageId(content)
   }
 
   private extractArkmeAppMessageMeta(content: string, localType: number): Record<string, any> | null {
@@ -3507,6 +3722,13 @@ class ExportService {
             'msg_id', 'msgId', 'MsgId', 'id',
             'WCDB_CT_local_id'
           ], 0)
+          const rawServerIdValue = this.getRowField(row, [
+            'server_id', 'serverId', 'ServerId',
+            'msg_server_id', 'msgServerId', 'MsgServerId',
+            'svr_id', 'svrId', 'msg_svr_id', 'msgSvrId', 'MsgSvrId',
+            'WCDB_CT_server_id'
+          ])
+          const serverIdRaw = this.normalizeUnsignedIntToken(rawServerIdValue)
           const serverId = this.getIntFromRow(row, [
             'server_id', 'serverId', 'ServerId',
             'msg_server_id', 'msgServerId', 'MsgServerId',
@@ -3598,6 +3820,7 @@ class ExportService {
           rows.push({
             localId,
             serverId,
+            serverIdRaw: serverIdRaw !== '0' ? serverIdRaw : undefined,
             createTime,
             localType,
             content,
@@ -4440,6 +4663,16 @@ class ExportService {
           content: content
         }
 
+        const platformMessageId = this.normalizeUnsignedIntToken(msg.serverIdRaw ?? msg.serverId)
+        if (platformMessageId !== '0') {
+          message.platformMessageId = platformMessageId
+        }
+
+        const replyToMessageId = this.extractChatLabReplyToMessageId(msg.content)
+        if (replyToMessageId) {
+          message.replyToMessageId = replyToMessageId
+        }
+
         // 如果有聊天记录，添加为嵌套字段
         if (msg.chatRecordList && msg.chatRecordList.length > 0) {
           const chatRecords: any[] = []
@@ -4895,6 +5128,20 @@ class ExportService {
           )
         }
 
+        const quotedReplyDisplay = await this.resolveQuotedReplyDisplayWithNames({
+          content: msg.content,
+          isGroup,
+          displayNamePreference: options.displayNamePreference,
+          getContact: getContactCached,
+          groupNicknamesMap,
+          cleanedMyWxid,
+          rawMyWxid,
+          myDisplayName: myInfo.displayName || cleanedMyWxid
+        })
+        if (quotedReplyDisplay) {
+          content = this.buildQuotedReplyText(quotedReplyDisplay)
+        }
+
         // 获取发送者信息用于名称显示
         const senderWxid = msg.senderUsername
         const contact = senderWxid
@@ -4938,6 +5185,12 @@ class ExportService {
           senderAvatarKey: msg.senderUsername
         }
 
+        const platformMessageId = this.getExportPlatformMessageId(msg)
+        if (platformMessageId) msgObj.platformMessageId = platformMessageId
+
+        const replyToMessageId = this.getExportReplyToMessageId(msg.content)
+        if (replyToMessageId) msgObj.replyToMessageId = replyToMessageId
+
         const appMsgMeta = this.extractArkmeAppMessageMeta(msg.content, msg.localType)
         if (appMsgMeta) {
           if (
@@ -4946,6 +5199,10 @@ class ExportService {
           ) {
             Object.assign(msgObj, appMsgMeta)
           }
+        }
+        if (quotedReplyDisplay) {
+          if (quotedReplyDisplay.quotedSender) msgObj.quotedSender = quotedReplyDisplay.quotedSender
+          if (quotedReplyDisplay.quotedPreview) msgObj.quotedContent = quotedReplyDisplay.quotedPreview
         }
 
         if (options.format === 'arkme-json') {
@@ -5144,6 +5401,8 @@ class ExportService {
             senderID,
             source: message.source
           }
+          if (message.platformMessageId) compactMessage.platformMessageId = message.platformMessageId
+          if (message.replyToMessageId) compactMessage.replyToMessageId = message.replyToMessageId
           if (message.locationLat != null) compactMessage.locationLat = message.locationLat
           if (message.locationLng != null) compactMessage.locationLng = message.locationLng
           if (message.locationPoiname) compactMessage.locationPoiname = message.locationPoiname
@@ -5781,6 +6040,20 @@ class ExportService {
           }
         }
 
+        const quotedReplyDisplay = await this.resolveQuotedReplyDisplayWithNames({
+          content: msg.content,
+          isGroup,
+          displayNamePreference: options.displayNamePreference,
+          getContact: getContactCached,
+          groupNicknamesMap,
+          cleanedMyWxid,
+          rawMyWxid,
+          myDisplayName: myInfo.displayName || cleanedMyWxid
+        })
+        if (quotedReplyDisplay) {
+          enrichedContentValue = this.buildQuotedReplyText(quotedReplyDisplay)
+        }
+
         // 调试日志
         if (msg.localType === 3 || msg.localType === 47) {
         }
@@ -6026,6 +6299,20 @@ class ExportService {
           if (transferDesc) {
             enrichedContentValue = this.appendTransferDesc(contentValue, transferDesc)
           }
+        }
+
+        const quotedReplyDisplay = await this.resolveQuotedReplyDisplayWithNames({
+          content: msg.content,
+          isGroup,
+          displayNamePreference: options.displayNamePreference,
+          getContact: getContactCached,
+          groupNicknamesMap,
+          cleanedMyWxid,
+          rawMyWxid,
+          myDisplayName: myInfo.displayName || cleanedMyWxid
+        })
+        if (quotedReplyDisplay) {
+          enrichedContentValue = this.buildQuotedReplyText(quotedReplyDisplay)
         }
 
         appendRow(useCompactColumns
@@ -6381,6 +6668,20 @@ class ExportService {
           }
         }
 
+        const quotedReplyDisplay = await this.resolveQuotedReplyDisplayWithNames({
+          content: msg.content,
+          isGroup,
+          displayNamePreference: options.displayNamePreference,
+          getContact: getContactCached,
+          groupNicknamesMap,
+          cleanedMyWxid,
+          rawMyWxid,
+          myDisplayName: myInfo.displayName || cleanedMyWxid
+        })
+        if (quotedReplyDisplay) {
+          enrichedContentValue = this.buildQuotedReplyText(quotedReplyDisplay)
+        }
+
         let senderRole: string
         let senderWxid: string
         let senderNickname: string
@@ -6522,7 +6823,7 @@ class ExportService {
         control,
         collectProgressReporter
       )
-      const totalMessages = collected.rows.length
+      let totalMessages = collected.rows.length
       if (totalMessages === 0) {
         return { success: false, error: '该会话在指定时间范围内没有消息' }
       }
@@ -6550,7 +6851,13 @@ class ExportService {
         ? await this.getGroupNicknamesForRoom(sessionId, groupNicknameCandidates)
         : new Map<string, string>()
 
-      const sortedMessages = collected.rows.sort((a, b) => a.createTime - b.createTime)
+      const sortedMessages = collected.rows
+        .sort((a, b) => a.createTime - b.createTime)
+        .filter((msg) => !this.isQuotedReplyMessage(msg.localType, msg.content || ''))
+      totalMessages = sortedMessages.length
+      if (totalMessages === 0) {
+        return { success: false, error: '该会话在指定时间范围内没有可导出的消息' }
+      }
 
       const voiceMessages = options.exportVoiceAsText
         ? sortedMessages.filter(msg => msg.localType === 34)
@@ -6742,10 +7049,11 @@ class ExportService {
             msg.isSend
           ) || '')
         const src = this.getWeCloneSource(msg, typeName, mediaItem)
+        const platformMessageId = this.getExportPlatformMessageId(msg) || ''
 
         const row = [
           i + 1,
-          i + 1,
+          platformMessageId,
           typeName,
           msg.isSend ? 1 : 0,
           talker,
@@ -6945,6 +7253,7 @@ class ExportService {
       if (collected.rows.length === 0) {
         return { success: false, error: '该会话在指定时间范围内没有消息' }
       }
+      const totalMessages = collected.rows.length
 
       const senderUsernames = new Set<string>()
       let senderScanIndex = 0
@@ -6987,6 +7296,7 @@ class ExportService {
         : []
 
       const mediaCache = new Map<string, MediaExportItem | null>()
+      const mediaDirCache = new Set<string>()
 
       if (mediaMessages.length > 0) {
         await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
@@ -7219,8 +7529,18 @@ class ExportService {
 
         const timeText = this.formatTimestamp(msg.createTime)
         const typeName = this.getMessageTypeName(msg.localType)
+        const quotedReplyDisplay = await this.resolveQuotedReplyDisplayWithNames({
+          content: msg.content,
+          isGroup,
+          displayNamePreference: options.displayNamePreference,
+          getContact: getContactCached,
+          groupNicknamesMap,
+          cleanedMyWxid,
+          rawMyWxid,
+          myDisplayName: myInfo.displayName || cleanedMyWxid
+        })
 
-        let textContent = this.formatHtmlMessageText(
+        let textContent = quotedReplyDisplay?.replyText || this.formatHtmlMessageText(
           msg.content,
           msg.localType,
           cleanedMyWxid,
@@ -7251,7 +7571,7 @@ class ExportService {
           }
         }
 
-        const linkCard = this.extractHtmlLinkCard(msg.content, msg.localType)
+        const linkCard = quotedReplyDisplay ? null : this.extractHtmlLinkCard(msg.content, msg.localType)
 
         let mediaHtml = ''
         if (mediaItem?.kind === 'image') {
@@ -7267,25 +7587,40 @@ class ExportService {
           mediaHtml = `<video class="message-media video" controls preload="metadata"${posterAttr} src="${this.escapeAttribute(encodeURI(mediaItem.relativePath))}"></video>`
         }
 
-        const textHtml = linkCard
-          ? `<div class="message-text"><a class="message-link-card" href="${this.escapeAttribute(linkCard.url)}" target="_blank" rel="noopener noreferrer">${this.renderTextWithEmoji(linkCard.title).replace(/\r?\n/g, '<br />')}</a></div>`
-          : (textContent
-            ? `<div class="message-text">${this.renderTextWithEmoji(textContent).replace(/\r?\n/g, '<br />')}</div>`
-            : '')
+        const textHtml = quotedReplyDisplay
+          ? (() => {
+            const quotedSenderHtml = quotedReplyDisplay.quotedSender
+              ? `<div class="quoted-sender">${this.escapeHtml(quotedReplyDisplay.quotedSender)}</div>`
+              : ''
+            const quotedPreviewHtml = `<div class="quoted-text">${this.renderTextWithEmoji(quotedReplyDisplay.quotedPreview).replace(/\r?\n/g, '<br />')}</div>`
+            const replyTextHtml = textContent
+              ? `<div class="message-text">${this.renderTextWithEmoji(textContent).replace(/\r?\n/g, '<br />')}</div>`
+              : ''
+            return `<div class="quoted-message">${quotedSenderHtml}${quotedPreviewHtml}</div>${replyTextHtml}`
+          })()
+          : (linkCard
+            ? `<div class="message-text"><a class="message-link-card" href="${this.escapeAttribute(linkCard.url)}" target="_blank" rel="noopener noreferrer">${this.renderTextWithEmoji(linkCard.title).replace(/\r?\n/g, '<br />')}</a></div>`
+            : (textContent
+              ? `<div class="message-text">${this.renderTextWithEmoji(textContent).replace(/\r?\n/g, '<br />')}</div>`
+              : ''))
         const senderNameHtml = isGroup
           ? `<div class="sender-name">${this.escapeHtml(resolvedSenderName)}</div>`
           : ''
         const timeHtml = `<div class="message-time">${this.escapeHtml(timeText)}</div>`
         const messageBody = `${timeHtml}${senderNameHtml}<div class="message-content">${mediaHtml}${textHtml}</div>`
+        const platformMessageId = this.getExportPlatformMessageId(msg)
+        const replyToMessageId = this.getExportReplyToMessageId(msg.content)
 
         // Compact JSON object
-        const itemObj = {
+        const itemObj: Record<string, any> = {
           i: i + 1, // index
           t: msg.createTime, // timestamp
           s: isSenderMe ? 1 : 0, // isSend
           a: avatarHtml, // avatar HTML
           b: messageBody // body HTML
         }
+        if (platformMessageId) itemObj.p = platformMessageId
+        if (replyToMessageId) itemObj.r = replyToMessageId
 
         writeBuf.push(JSON.stringify(itemObj))
 
@@ -7333,8 +7668,10 @@ class ExportService {
       // Render Item Function
       const renderItem = (item, index) => {
          const isSenderMe = item.s === 1;
+         const platformIdAttr = item.p ? \` data-platform-message-id="\${item.p}"\` : '';
+         const replyToAttr = item.r ? \` data-reply-to-message-id="\${item.r}"\` : '';
          return \`
-          <div class="message \${isSenderMe ? 'sent' : 'received'}" data-index="\${item.i}">
+          <div class="message \${isSenderMe ? 'sent' : 'received'}" data-index="\${item.i}"\${platformIdAttr}\${replyToAttr}>
             <div class="message-row">
               <div class="avatar">\${item.a}</div>
               <div class="bubble">

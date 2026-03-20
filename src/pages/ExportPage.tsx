@@ -52,10 +52,13 @@ import { ExportDefaultsSettingsForm, type ExportDefaultsSettingsPatch } from '..
 import type { SnsPost } from '../types/sns'
 import {
   cloneExportDateRange,
+  cloneExportDateRangeSelection,
   createDefaultDateRange,
   createDefaultExportDateRangeSelection,
   getExportDateRangeLabel,
   resolveExportDateRangeConfig,
+  startOfDay,
+  endOfDay,
   type ExportDateRangeSelection
 } from '../utils/exportDateRange'
 import './ExportPage.scss'
@@ -830,6 +833,13 @@ interface SessionContentMetric {
   transferMessages?: number
   redPacketMessages?: number
   callMessages?: number
+  firstTimestamp?: number
+  lastTimestamp?: number
+}
+
+interface TimeRangeBounds {
+  minDate: Date
+  maxDate: Date
 }
 
 interface SessionExportCacheMeta {
@@ -1049,27 +1059,74 @@ const normalizeMessageCount = (value: unknown): number | undefined => {
   return Math.floor(parsed)
 }
 
+const normalizeTimestampSeconds = (value: unknown): number | undefined => {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined
+  return Math.floor(parsed)
+}
+
+const clampExportSelectionToBounds = (
+  selection: ExportDateRangeSelection,
+  bounds: TimeRangeBounds | null
+): ExportDateRangeSelection => {
+  if (!bounds) return cloneExportDateRangeSelection(selection)
+
+  const boundedStart = startOfDay(bounds.minDate)
+  const boundedEnd = endOfDay(bounds.maxDate)
+  const originalStart = selection.useAllTime ? boundedStart : startOfDay(selection.dateRange.start)
+  const originalEnd = selection.useAllTime ? boundedEnd : endOfDay(selection.dateRange.end)
+  const nextStart = new Date(Math.min(Math.max(originalStart.getTime(), boundedStart.getTime()), boundedEnd.getTime()))
+  const nextEndCandidate = new Date(Math.min(Math.max(originalEnd.getTime(), boundedStart.getTime()), boundedEnd.getTime()))
+  const nextEnd = nextEndCandidate.getTime() < nextStart.getTime() ? endOfDay(nextStart) : nextEndCandidate
+  const rangeChanged = nextStart.getTime() !== originalStart.getTime() || nextEnd.getTime() !== originalEnd.getTime()
+
+  return {
+    preset: selection.useAllTime ? selection.preset : (rangeChanged ? 'custom' : selection.preset),
+    useAllTime: selection.useAllTime,
+    dateRange: {
+      start: nextStart,
+      end: nextEnd
+    }
+  }
+}
+
+const areExportSelectionsEqual = (left: ExportDateRangeSelection, right: ExportDateRangeSelection): boolean => (
+  left.preset === right.preset &&
+  left.useAllTime === right.useAllTime &&
+  left.dateRange.start.getTime() === right.dateRange.start.getTime() &&
+  left.dateRange.end.getTime() === right.dateRange.end.getTime()
+)
+
 const pickSessionMediaMetric = (
   metricRaw: SessionExportMetric | SessionContentMetric | undefined
 ): SessionContentMetric | null => {
   if (!metricRaw) return null
+  const totalMessages = normalizeMessageCount(metricRaw.totalMessages)
   const voiceMessages = normalizeMessageCount(metricRaw.voiceMessages)
   const imageMessages = normalizeMessageCount(metricRaw.imageMessages)
   const videoMessages = normalizeMessageCount(metricRaw.videoMessages)
   const emojiMessages = normalizeMessageCount(metricRaw.emojiMessages)
+  const firstTimestamp = normalizeTimestampSeconds(metricRaw.firstTimestamp)
+  const lastTimestamp = normalizeTimestampSeconds(metricRaw.lastTimestamp)
   if (
+    typeof totalMessages !== 'number' &&
     typeof voiceMessages !== 'number' &&
     typeof imageMessages !== 'number' &&
     typeof videoMessages !== 'number' &&
-    typeof emojiMessages !== 'number'
+    typeof emojiMessages !== 'number' &&
+    typeof firstTimestamp !== 'number' &&
+    typeof lastTimestamp !== 'number'
   ) {
     return null
   }
   return {
+    totalMessages,
     voiceMessages,
     imageMessages,
     videoMessages,
-    emojiMessages
+    emojiMessages,
+    firstTimestamp,
+    lastTimestamp
   }
 }
 
@@ -1520,6 +1577,8 @@ function ExportPage() {
   const [snsExportLivePhotos, setSnsExportLivePhotos] = useState(false)
   const [snsExportVideos, setSnsExportVideos] = useState(false)
   const [isTimeRangeDialogOpen, setIsTimeRangeDialogOpen] = useState(false)
+  const [isResolvingTimeRangeBounds, setIsResolvingTimeRangeBounds] = useState(false)
+  const [timeRangeBounds, setTimeRangeBounds] = useState<TimeRangeBounds | null>(null)
   const [isExportDefaultsModalOpen, setIsExportDefaultsModalOpen] = useState(false)
   const [timeRangeSelection, setTimeRangeSelection] = useState<ExportDateRangeSelection>(() => createDefaultExportDateRangeSelection())
   const [exportDefaultFormat, setExportDefaultFormat] = useState<TextExportFormat>('excel')
@@ -2686,7 +2745,9 @@ function ExportPage() {
         typeof emojiMessages !== 'number' &&
         typeof transferMessages !== 'number' &&
         typeof redPacketMessages !== 'number' &&
-        typeof callMessages !== 'number'
+        typeof callMessages !== 'number' &&
+        typeof normalizeTimestampSeconds(metricRaw.firstTimestamp) !== 'number' &&
+        typeof normalizeTimestampSeconds(metricRaw.lastTimestamp) !== 'number'
       ) {
         continue
       }
@@ -2699,7 +2760,9 @@ function ExportPage() {
         emojiMessages,
         transferMessages,
         redPacketMessages,
-        callMessages
+        callMessages,
+        firstTimestamp: normalizeTimestampSeconds(metricRaw.firstTimestamp),
+        lastTimestamp: normalizeTimestampSeconds(metricRaw.lastTimestamp)
       }
       if (typeof totalMessages === 'number') {
         nextMessageCounts[sessionId] = totalMessages
@@ -2733,7 +2796,9 @@ function ExportPage() {
             emojiMessages: typeof metric.emojiMessages === 'number' ? metric.emojiMessages : previous.emojiMessages,
             transferMessages: typeof metric.transferMessages === 'number' ? metric.transferMessages : previous.transferMessages,
             redPacketMessages: typeof metric.redPacketMessages === 'number' ? metric.redPacketMessages : previous.redPacketMessages,
-            callMessages: typeof metric.callMessages === 'number' ? metric.callMessages : previous.callMessages
+            callMessages: typeof metric.callMessages === 'number' ? metric.callMessages : previous.callMessages,
+            firstTimestamp: typeof metric.firstTimestamp === 'number' ? metric.firstTimestamp : previous.firstTimestamp,
+            lastTimestamp: typeof metric.lastTimestamp === 'number' ? metric.lastTimestamp : previous.lastTimestamp
           }
           if (
             previous.totalMessages === nextMetric.totalMessages &&
@@ -2743,7 +2808,9 @@ function ExportPage() {
             previous.emojiMessages === nextMetric.emojiMessages &&
             previous.transferMessages === nextMetric.transferMessages &&
             previous.redPacketMessages === nextMetric.redPacketMessages &&
-            previous.callMessages === nextMetric.callMessages
+            previous.callMessages === nextMetric.callMessages &&
+            previous.firstTimestamp === nextMetric.firstTimestamp &&
+            previous.lastTimestamp === nextMetric.lastTimestamp
           ) {
             continue
           }
@@ -3898,6 +3965,7 @@ function ExportPage() {
   const openExportDialog = useCallback((payload: Omit<ExportDialogState, 'open'>) => {
     setExportDialog({ open: true, ...payload })
     setIsTimeRangeDialogOpen(false)
+    setTimeRangeBounds(null)
     setTimeRangeSelection(exportDefaultDateRangeSelection)
 
     setOptions(prev => {
@@ -3960,11 +4028,143 @@ function ExportPage() {
   const closeExportDialog = useCallback(() => {
     setExportDialog(prev => ({ ...prev, open: false }))
     setIsTimeRangeDialogOpen(false)
+    setTimeRangeBounds(null)
   }, [])
 
+  const resolveChatExportTimeRangeBounds = useCallback(async (sessionIds: string[]): Promise<TimeRangeBounds | null> => {
+    const normalizedSessionIds = Array.from(new Set((sessionIds || []).map(id => String(id || '').trim()).filter(Boolean)))
+    if (normalizedSessionIds.length === 0) return null
+
+    const sessionRowMap = new Map<string, SessionRow>()
+    for (const session of sessions) {
+      sessionRowMap.set(session.username, session)
+    }
+
+    let minTimestamp: number | undefined
+    let maxTimestamp: number | undefined
+    const resolvedSessionBounds = new Map<string, { hasMin: boolean; hasMax: boolean }>()
+
+    const absorbMetric = (sessionId: string, metric?: { firstTimestamp?: number; lastTimestamp?: number } | null) => {
+      if (!metric) return
+      const firstTimestamp = normalizeTimestampSeconds(metric.firstTimestamp)
+      const lastTimestamp = normalizeTimestampSeconds(metric.lastTimestamp)
+      if (typeof firstTimestamp !== 'number' && typeof lastTimestamp !== 'number') return
+
+      const previous = resolvedSessionBounds.get(sessionId) || { hasMin: false, hasMax: false }
+      const nextState = {
+        hasMin: previous.hasMin || typeof firstTimestamp === 'number',
+        hasMax: previous.hasMax || typeof lastTimestamp === 'number'
+      }
+      resolvedSessionBounds.set(sessionId, nextState)
+
+      if (typeof firstTimestamp === 'number' && (minTimestamp === undefined || firstTimestamp < minTimestamp)) {
+        minTimestamp = firstTimestamp
+      }
+      if (typeof lastTimestamp === 'number' && (maxTimestamp === undefined || lastTimestamp > maxTimestamp)) {
+        maxTimestamp = lastTimestamp
+      }
+    }
+
+    for (const sessionId of normalizedSessionIds) {
+      const sessionRow = sessionRowMap.get(sessionId)
+      absorbMetric(sessionId, {
+        firstTimestamp: undefined,
+        lastTimestamp: sessionRow?.sortTimestamp || sessionRow?.lastTimestamp
+      })
+      absorbMetric(sessionId, sessionContentMetrics[sessionId])
+      if (sessionDetail?.wxid === sessionId) {
+        absorbMetric(sessionId, {
+          firstTimestamp: sessionDetail.firstMessageTime,
+          lastTimestamp: sessionDetail.latestMessageTime
+        })
+      }
+    }
+
+    const applyStatsResult = (result?: {
+      success: boolean
+      data?: Record<string, SessionExportMetric>
+    } | null) => {
+      if (!result?.success || !result.data) return
+      applySessionMediaMetricsFromStats(result.data)
+      for (const sessionId of normalizedSessionIds) {
+        absorbMetric(sessionId, result.data[sessionId])
+      }
+    }
+
+    const missingSessionIds = () => normalizedSessionIds.filter(sessionId => {
+      const resolved = resolvedSessionBounds.get(sessionId)
+      return !resolved?.hasMin || !resolved?.hasMax
+    })
+
+    const staleSessionIds = new Set<string>()
+
+    if (missingSessionIds().length > 0) {
+      const cacheResult = await window.electronAPI.chat.getExportSessionStats(
+        missingSessionIds(),
+        { includeRelations: false, allowStaleCache: true, cacheOnly: true }
+      )
+      applyStatsResult(cacheResult)
+      for (const sessionId of cacheResult?.needsRefresh || []) {
+        staleSessionIds.add(String(sessionId || '').trim())
+      }
+    }
+
+    const sessionsNeedingFreshStats = Array.from(new Set([
+      ...missingSessionIds(),
+      ...Array.from(staleSessionIds).filter(Boolean)
+    ]))
+
+    if (sessionsNeedingFreshStats.length > 0) {
+      applyStatsResult(await window.electronAPI.chat.getExportSessionStats(
+        sessionsNeedingFreshStats,
+        { includeRelations: false }
+      ))
+    }
+
+    if (missingSessionIds().length > 0) {
+      return null
+    }
+    if (typeof minTimestamp !== 'number' || typeof maxTimestamp !== 'number') {
+      return null
+    }
+
+    return {
+      minDate: new Date(minTimestamp * 1000),
+      maxDate: new Date(maxTimestamp * 1000)
+    }
+  }, [applySessionMediaMetricsFromStats, sessionContentMetrics, sessionDetail, sessions])
+
   const openTimeRangeDialog = useCallback(() => {
-    setIsTimeRangeDialogOpen(true)
-  }, [])
+    void (async () => {
+      if (isResolvingTimeRangeBounds) return
+      setIsResolvingTimeRangeBounds(true)
+      try {
+        let nextBounds: TimeRangeBounds | null = null
+        if (exportDialog.scope !== 'sns') {
+          nextBounds = await resolveChatExportTimeRangeBounds(exportDialog.sessionIds)
+        }
+        setTimeRangeBounds(nextBounds)
+        if (nextBounds) {
+          const nextSelection = clampExportSelectionToBounds(timeRangeSelection, nextBounds)
+          if (!areExportSelectionsEqual(nextSelection, timeRangeSelection)) {
+            setTimeRangeSelection(nextSelection)
+            setOptions(prev => ({
+              ...prev,
+              useAllTime: nextSelection.useAllTime,
+              dateRange: cloneExportDateRange(nextSelection.dateRange)
+            }))
+          }
+        }
+        setIsTimeRangeDialogOpen(true)
+      } catch (error) {
+        console.error('导出页解析时间范围边界失败', error)
+        setTimeRangeBounds(null)
+        setIsTimeRangeDialogOpen(true)
+      } finally {
+        setIsResolvingTimeRangeBounds(false)
+      }
+    })()
+  }, [exportDialog.scope, exportDialog.sessionIds, isResolvingTimeRangeBounds, resolveChatExportTimeRangeBounds, timeRangeSelection])
 
   const closeTimeRangeDialog = useCallback(() => {
     setIsTimeRangeDialogOpen(false)
@@ -7753,8 +7953,9 @@ function ExportPage() {
                     type="button"
                     className="time-range-trigger"
                     onClick={openTimeRangeDialog}
+                    disabled={isResolvingTimeRangeBounds}
                   >
-                    <span>{timeRangeSummaryLabel}</span>
+                    <span>{isResolvingTimeRangeBounds ? '正在统计可选时间...' : timeRangeSummaryLabel}</span>
                     <span className="time-range-arrow">&gt;</span>
                   </button>
                 </div>
@@ -7840,6 +8041,8 @@ function ExportPage() {
             <ExportDateRangeDialog
               open={isTimeRangeDialogOpen}
               value={timeRangeSelection}
+              minDate={timeRangeBounds?.minDate}
+              maxDate={timeRangeBounds?.maxDate}
               onClose={closeTimeRangeDialog}
               onConfirm={(nextSelection) => {
                 setTimeRangeSelection(nextSelection)

@@ -580,6 +580,8 @@ export interface ExportSessionContentMetricCacheEntry {
   imageMessages?: number
   videoMessages?: number
   emojiMessages?: number
+  firstTimestamp?: number
+  lastTimestamp?: number
 }
 
 export interface ExportSessionContentMetricCacheItem {
@@ -742,6 +744,12 @@ export async function getExportSessionContentMetricCache(scopeKey: string): Prom
     if (typeof source.emojiMessages === 'number' && Number.isFinite(source.emojiMessages) && source.emojiMessages >= 0) {
       metric.emojiMessages = Math.floor(source.emojiMessages)
     }
+    if (typeof source.firstTimestamp === 'number' && Number.isFinite(source.firstTimestamp) && source.firstTimestamp > 0) {
+      metric.firstTimestamp = Math.floor(source.firstTimestamp)
+    }
+    if (typeof source.lastTimestamp === 'number' && Number.isFinite(source.lastTimestamp) && source.lastTimestamp > 0) {
+      metric.lastTimestamp = Math.floor(source.lastTimestamp)
+    }
     if (Object.keys(metric).length === 0) continue
     metrics[sessionId] = metric
   }
@@ -780,6 +788,12 @@ export async function setExportSessionContentMetricCache(
     }
     if (typeof rawMetric.emojiMessages === 'number' && Number.isFinite(rawMetric.emojiMessages) && rawMetric.emojiMessages >= 0) {
       metric.emojiMessages = Math.floor(rawMetric.emojiMessages)
+    }
+    if (typeof rawMetric.firstTimestamp === 'number' && Number.isFinite(rawMetric.firstTimestamp) && rawMetric.firstTimestamp > 0) {
+      metric.firstTimestamp = Math.floor(rawMetric.firstTimestamp)
+    }
+    if (typeof rawMetric.lastTimestamp === 'number' && Number.isFinite(rawMetric.lastTimestamp) && rawMetric.lastTimestamp > 0) {
+      metric.lastTimestamp = Math.floor(rawMetric.lastTimestamp)
     }
     if (Object.keys(metric).length === 0) continue
     normalized[sessionId] = metric
