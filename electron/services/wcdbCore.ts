@@ -266,8 +266,9 @@ export class WcdbCore {
   private getDllPath(): string {
     const isMac = process.platform === 'darwin'
     const isLinux = process.platform === 'linux'
+    const isArm64 = process.arch === 'arm64'
     const libName = isMac ? 'libwcdb_api.dylib' : isLinux ? 'libwcdb_api.so' : 'wcdb_api.dll'
-    const subDir = isMac ? 'macos' : isLinux ? 'linux' : ''
+    const subDir = isMac ? 'macos' : isLinux ? 'linux' : (isArm64 ? 'arm64' : '')
     
     const envDllPath = process.env.WCDB_DLL_PATH
     if (envDllPath && envDllPath.length > 0) {
