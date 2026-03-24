@@ -631,6 +631,9 @@ class HttpService {
     const offset = this.parseIntParam(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER)
     const usernames = this.parseStringListParam(url.searchParams.get('usernames'))
     const keyword = (url.searchParams.get('keyword') || '').trim() || undefined
+    const resolveMedia = this.parseBooleanParam(url, ['media', 'resolveMedia', 'meiti'], true)
+    const inlineMedia = resolveMedia && this.parseBooleanParam(url, ['inline'], false)
+    const replaceMedia = resolveMedia && this.parseBooleanParam(url, ['replace'], true)
     const startTimeRaw = this.parseTimeParam(url.searchParams.get('start'))
     const endTimeRaw = this.parseTimeParam(url.searchParams.get('end'), true)
     const startTime = startTimeRaw > 0 ? startTimeRaw : undefined
@@ -642,10 +645,15 @@ class HttpService {
       return
     }
 
+    let timeline = result.timeline || []
+    if (resolveMedia && timeline.length > 0) {
+      timeline = await this.enrichSnsTimelineMedia(timeline, inlineMedia, replaceMedia)
+    }
+
     this.sendJson(res, {
       success: true,
-      count: result.timeline?.length || 0,
-      timeline: result.timeline || []
+      count: timeline.length,
+      timeline
     })
   }
 
@@ -680,8 +688,7 @@ class HttpService {
       return
     }
 
-    const keyRaw = (url.searchParams.get('key') || '').trim()
-    const key = keyRaw ? (/^-?\d+$/.test(keyRaw) ? Number(keyRaw) : keyRaw) : undefined
+    const key = this.toSnsMediaKey(url.searchParams.get('key'))
     const result = await snsService.downloadImage(mediaUrl, key)
     if (!result.success || !result.data) {
       this.sendError(res, 502, result.error || 'Failed to proxy sns media')
@@ -799,6 +806,117 @@ class HttpService {
       return
     }
     this.sendJson(res, result)
+  }
+
+  private toSnsMediaKey(value: unknown): string | number | undefined {
+    if (value == null) return undefined
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    const text = String(value).trim()
+    if (!text) return undefined
+    if (/^-?\d+$/.test(text)) return Number(text)
+    return text
+  }
+
+  private buildSnsMediaProxyUrl(rawUrl: string, key?: string | number): string | undefined {
+    const target = String(rawUrl || '').trim()
+    if (!target) return undefined
+    const params = new URLSearchParams({ url: target })
+    if (key !== undefined) params.set('key', String(key))
+    return `http://127.0.0.1:${this.port}/api/v1/sns/media/proxy?${params.toString()}`
+  }
+
+  private async resolveSnsMediaUrl(
+    rawUrl: string,
+    key: string | number | undefined,
+    inline: boolean
+  ): Promise<{ resolvedUrl?: string; proxyUrl?: string }> {
+    const proxyUrl = this.buildSnsMediaProxyUrl(rawUrl, key)
+    if (!proxyUrl) return {}
+    if (!inline) return { resolvedUrl: proxyUrl, proxyUrl }
+
+    try {
+      const resolved = await snsService.proxyImage(rawUrl, key)
+      if (resolved.success && resolved.dataUrl) {
+        return { resolvedUrl: resolved.dataUrl, proxyUrl }
+      }
+    } catch (error) {
+      console.warn('[HttpService] resolveSnsMediaUrl inline failed:', error)
+    }
+
+    return { resolvedUrl: proxyUrl, proxyUrl }
+  }
+
+  private async enrichSnsTimelineMedia(posts: any[], inline: boolean, replace: boolean): Promise<any[]> {
+    return Promise.all(
+      (posts || []).map(async (post) => {
+        const mediaList = Array.isArray(post?.media) ? post.media : []
+        if (mediaList.length === 0) return post
+
+        const nextMedia = await Promise.all(
+          mediaList.map(async (media: any) => {
+            const rawUrl = typeof media?.url === 'string' ? media.url : ''
+            const rawThumb = typeof media?.thumb === 'string' ? media.thumb : ''
+            const mediaKey = this.toSnsMediaKey(media?.key)
+
+            const [urlResolved, thumbResolved] = await Promise.all([
+              this.resolveSnsMediaUrl(rawUrl, mediaKey, inline),
+              this.resolveSnsMediaUrl(rawThumb, mediaKey, inline)
+            ])
+
+            const nextItem: any = {
+              ...media,
+              rawUrl,
+              rawThumb,
+              resolvedUrl: urlResolved.resolvedUrl,
+              resolvedThumbUrl: thumbResolved.resolvedUrl,
+              proxyUrl: urlResolved.proxyUrl,
+              proxyThumbUrl: thumbResolved.proxyUrl
+            }
+
+            if (replace) {
+              nextItem.url = urlResolved.resolvedUrl || rawUrl
+              nextItem.thumb = thumbResolved.resolvedUrl || rawThumb
+            }
+
+            if (media?.livePhoto && typeof media.livePhoto === 'object') {
+              const livePhoto = media.livePhoto
+              const rawLiveUrl = typeof livePhoto.url === 'string' ? livePhoto.url : ''
+              const rawLiveThumb = typeof livePhoto.thumb === 'string' ? livePhoto.thumb : ''
+              const liveKey = this.toSnsMediaKey(livePhoto.key ?? mediaKey)
+
+              const [liveUrlResolved, liveThumbResolved] = await Promise.all([
+                this.resolveSnsMediaUrl(rawLiveUrl, liveKey, inline),
+                this.resolveSnsMediaUrl(rawLiveThumb, liveKey, inline)
+              ])
+
+              const nextLive: any = {
+                ...livePhoto,
+                rawUrl: rawLiveUrl,
+                rawThumb: rawLiveThumb,
+                resolvedUrl: liveUrlResolved.resolvedUrl,
+                resolvedThumbUrl: liveThumbResolved.resolvedUrl,
+                proxyUrl: liveUrlResolved.proxyUrl,
+                proxyThumbUrl: liveThumbResolved.proxyUrl
+              }
+
+              if (replace) {
+                nextLive.url = liveUrlResolved.resolvedUrl || rawLiveUrl
+                nextLive.thumb = liveThumbResolved.resolvedUrl || rawLiveThumb
+              }
+
+              nextItem.livePhoto = nextLive
+            }
+
+            return nextItem
+          })
+        )
+
+        return {
+          ...post,
+          media: nextMedia
+        }
+      })
+    )
   }
 
   private getApiMediaExportPath(): string {

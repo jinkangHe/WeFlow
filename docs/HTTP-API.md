@@ -309,13 +309,25 @@ GET /api/v1/sns/timeline
 | `keyword` | string | ❌ | 关键词过滤（正文） |
 | `start` | string | ❌ | 开始时间，支持 `YYYYMMDD` 或秒/毫秒时间戳 |
 | `end` | string | ❌ | 结束时间，支持 `YYYYMMDD` 或秒/毫秒时间戳 |
+| `media` | number | ❌ | 是否返回可直接访问的媒体地址，默认 `1` |
+| `replace` | number | ❌ | `media=1` 时，是否用解密地址覆盖 `media.url/thumb`，默认 `1` |
+| `inline` | number | ❌ | `media=1` 时，是否内联返回 `data:` URL，默认 `0`（建议仅小批量使用） |
 
 **示例请求**
 ```bash
 GET http://127.0.0.1:5031/api/v1/sns/timeline?limit=20
 GET http://127.0.0.1:5031/api/v1/sns/timeline?usernames=wxid_a,wxid_b&keyword=旅行
 GET http://127.0.0.1:5031/api/v1/sns/timeline?start=20250101&end=20251231
+GET http://127.0.0.1:5031/api/v1/sns/timeline?limit=5&media=1&replace=1
+GET http://127.0.0.1:5031/api/v1/sns/timeline?limit=3&media=1&inline=1
 ```
+
+**媒体字段说明（`media=1`）**
+
+- `media[].rawUrl/rawThumb`：原始朋友圈地址
+- `media[].proxyUrl/proxyThumbUrl`：可直接访问的解密代理地址
+- `media[].resolvedUrl/resolvedThumbUrl`：最终可用地址（`inline=1` 时优先为 `data:` URL）
+- `replace=1` 时，`media[].url/thumb` 会被替换为 `resolvedUrl/resolvedThumbUrl`
 
 ---
 
