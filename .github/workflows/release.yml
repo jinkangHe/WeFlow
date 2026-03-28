@@ -12,27 +12,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  prepare-release:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Mark release as pre-release (building)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="$GITHUB_REF_NAME"
-          REPO="$GITHUB_REPOSITORY"
-          # Create or update the release as a pre-release with a placeholder note
-          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
-            gh release edit "$TAG" --repo "$REPO" --prerelease --notes $'## ⚠️ 正在自动构建中，请勿下载\n\n各平台安装包正在构建，完成后将自动更新本页面并正式发布。\n\n**请勿在此期间下载任何文件。**'
-          else
-            gh release create "$TAG" --repo "$REPO" --prerelease --title "$TAG" --notes $'## ⚠️ 正在自动构建中，请勿下载\n\n各平台安装包正在构建，完成后将自动更新本页面并正式发布。\n\n**请勿在此期间下载任何文件。**'
-          fi
-
   release-mac-arm64:
     runs-on: macos-14
-    needs: prepare-release
 
     steps:
       - name: Check out git repository
@@ -61,16 +42,31 @@ jobs:
           npx tsc
           npx vite build
 
-      - name: Package and Publish macOS arm64 (unsigned DMG + ZIP)
+      - name: Package and Publish macOS arm64 (unsigned DMG)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
-          npx electron-builder --mac --arm64 --publish always
+          npx electron-builder --mac dmg --arm64 --publish always
+
+      - name: Inject minimumVersion into latest yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG=${GITHUB_REF_NAME}
+          REPO=${{ github.repository }}
+          MINIMUM_VERSION="4.1.7"
+          for YML_FILE in latest-mac.yml latest-arm64-mac.yml; do
+            gh release download "$TAG" --repo "$REPO" --pattern "$YML_FILE" --output "/tmp/$YML_FILE" 2>/dev/null || continue
+            if ! grep -q 'minimumVersion' "/tmp/$YML_FILE"; then
+              echo "minimumVersion: $MINIMUM_VERSION" >> "/tmp/$YML_FILE"
+            fi
+            gh release upload "$TAG" --repo "$REPO" "/tmp/$YML_FILE" --clobber
+          done
 
   release-linux:
     runs-on: ubuntu-latest
-    needs: prepare-release
 
     steps:
       - name: Check out git repository
@@ -105,9 +101,22 @@ jobs:
         run: |
           npx electron-builder --linux --publish always
 
+      - name: Inject minimumVersion into latest yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG=${GITHUB_REF_NAME}
+          REPO=${{ github.repository }}
+          MINIMUM_VERSION="4.1.7"
+          gh release download "$TAG" --repo "$REPO" --pattern "latest-linux.yml" --output "/tmp/latest-linux.yml" 2>/dev/null
+          if [ -f /tmp/latest-linux.yml ] && ! grep -q 'minimumVersion' /tmp/latest-linux.yml; then
+            echo "minimumVersion: $MINIMUM_VERSION" >> /tmp/latest-linux.yml
+            gh release upload "$TAG" --repo "$REPO" /tmp/latest-linux.yml --clobber
+          fi
+
   release:
     runs-on: windows-latest
-    needs: prepare-release
 
     steps:
       - name: Check out git repository
@@ -139,13 +148,25 @@ jobs:
       - name: Package and Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx electron-builder --win nsis --x64 --publish always '--config.artifactName=${productName}-${version}-x64-Setup.${ext}'
+
+      - name: Inject minimumVersion into latest yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          npx electron-builder --win nsis --x64 --publish always "-c.artifactName=\${productName}-\${version}-x64-Setup.\${ext}"
+          TAG=${GITHUB_REF_NAME}
+          REPO=${{ github.repository }}
+          MINIMUM_VERSION="4.1.7"
+          gh release download "$TAG" --repo "$REPO" --pattern "latest.yml" --output "/tmp/latest.yml" 2>/dev/null
+          if [ -f /tmp/latest.yml ] && ! grep -q 'minimumVersion' /tmp/latest.yml; then
+            echo "minimumVersion: $MINIMUM_VERSION" >> /tmp/latest.yml
+            gh release upload "$TAG" --repo "$REPO" /tmp/latest.yml --clobber
+          fi
 
   release-windows-arm64:
     runs-on: windows-latest
-    needs: prepare-release
 
     steps:
       - name: Check out git repository
@@ -177,9 +198,22 @@ jobs:
       - name: Package and Publish Windows arm64
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx electron-builder --win nsis --arm64 --publish always '--config.publish.channel=latest-arm64' '--config.artifactName=${productName}-${version}-arm64-Setup.${ext}'
+
+      - name: Inject minimumVersion into latest yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          npx electron-builder --win nsis --arm64 --publish always -c.publish.channel=latest-arm64 "-c.artifactName=\${productName}-\${version}-arm64-Setup.\${ext}"
+          TAG=${GITHUB_REF_NAME}
+          REPO=${{ github.repository }}
+          MINIMUM_VERSION="4.1.7"
+          gh release download "$TAG" --repo "$REPO" --pattern "latest-arm64.yml" --output "/tmp/latest-arm64.yml" 2>/dev/null
+          if [ -f /tmp/latest-arm64.yml ] && ! grep -q 'minimumVersion' /tmp/latest-arm64.yml; then
+            echo "minimumVersion: $MINIMUM_VERSION" >> /tmp/latest-arm64.yml
+            gh release upload "$TAG" --repo "$REPO" /tmp/latest-arm64.yml --clobber
+          fi
 
   update-release-notes:
     runs-on: ubuntu-latest
@@ -190,53 +224,6 @@ jobs:
       - release-windows-arm64
 
     steps:
-      - name: Fix latest.yml to point to x64 installer
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="$GITHUB_REF_NAME"
-          VERSION="${TAG#v}"
-          REPO="$GITHUB_REPOSITORY"
-
-          # Find the x64 exe asset name
-          ASSETS_JSON="$(gh release view "$TAG" --repo "$REPO" --json assets)"
-          X64_ASSET="$(echo "$ASSETS_JSON" | jq -r '[.assets[].name | select(test("x64.*\\.exe$"))][0] // ""')"
-          if [ -z "$X64_ASSET" ]; then
-            X64_ASSET="$(echo "$ASSETS_JSON" | jq -r '[.assets[].name | select(test("\\.exe$")) | select(test("arm64") | not)][0] // ""')"
-          fi
-
-          if [ -z "$X64_ASSET" ]; then
-            echo "ERROR: Could not find x64 exe asset"
-            exit 1
-          fi
-
-          echo "Downloading x64 installer: $X64_ASSET"
-          gh release download "$TAG" --repo "$REPO" --pattern "$X64_ASSET" --dir /tmp/weflow-x64
-
-          SHA512_B64="$(sha512sum "/tmp/weflow-x64/$X64_ASSET" | awk '{print $1}' | xxd -r -p | base64 -w 0)"
-          SIZE="$(stat -c%s "/tmp/weflow-x64/$X64_ASSET")"
-          RELEASE_DATE="$(gh release view "$TAG" --repo "$REPO" --json publishedAt -q .publishedAt)"
-
-          cat > /tmp/latest.yml <<YMLEOF
-          version: $VERSION
-          files:
-            - url: $X64_ASSET
-              sha512: $SHA512_B64
-              size: $SIZE
-          path: $X64_ASSET
-          sha512: $SHA512_B64
-          releaseDate: '$RELEASE_DATE'
-          YMLEOF
-
-          # Strip leading spaces (heredoc indentation)
-          sed -i 's/^          //' /tmp/latest.yml
-          cat /tmp/latest.yml
-
-          gh release upload "$TAG" --repo "$REPO" /tmp/latest.yml --clobber
-          echo "latest.yml updated successfully to point to $X64_ASSET"
-
       - name: Generate release notes with platform download links
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -294,18 +281,10 @@ jobs:
           ## macOS 安装提示（未知来源）
           - 若打开时提示“来自未知开发者”或“无法验证开发者”，请到「系统设置 -> 隐私与安全性」中允许打开该应用。
           - 如果仍被系统拦截，请在终端执行以下命令去除隔离标记：
-          - xattr -rd com.apple.quarantine /Applications/WeFlow.app
+          - \`xattr -dr com.apple.quarantine "/Applications/WeFlow.app"\`
           - 执行后重新打开 WeFlow。
 
           > 如果某个平台链接暂时未生成，可进入完整发布页查看全部资源：$RELEASE_PAGE
           EOF
 
           gh release edit "$TAG" --repo "$REPO" --notes-file release_notes.md
-
-      - name: Mark release as published (no longer pre-release)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --latest --draft=false --prerelease=false
