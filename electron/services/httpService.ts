@@ -1010,7 +1010,8 @@ class HttpService {
     if (!target) return undefined
     const params = new URLSearchParams({ url: target })
     if (key !== undefined) params.set('key', String(key))
-    return `http://${this.host}:${this.port}/api/v1/sns/media/proxy?${params.toString()}`
+    const clientHost = this.host === '0.0.0.0' ? '127.0.0.1' : this.host
+    return `http://${clientHost}:${this.port}/api/v1/sns/media/proxy?${params.toString()}`
   }
 
   private async resolveSnsMediaUrl(

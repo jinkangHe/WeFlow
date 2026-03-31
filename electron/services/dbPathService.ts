@@ -100,8 +100,8 @@ export class DbPathService {
           try {
             const entries = readdirSync(appSupportBase)
             for (const entry of entries) {
-              // 匹配形如 2.0b4.0.9 的版本目录
-              if (/^\d+\.\d+b\d+\.\d+/.test(entry) || /^\d+\.\d+\.\d+/.test(entry)) {
+              // 匹配所有版本号格式目录
+              if (/^\d+\.\d+/.test(entry)) {
                 possiblePaths.push(join(appSupportBase, entry))
               }
             }
@@ -109,9 +109,14 @@ export class DbPathService {
         }
         // macOS 旧路径兜底
         possiblePaths.push(join(home, 'Library', 'Containers', 'com.tencent.xinWeChat', 'Data', 'Documents', 'xwechat_files'))
+      } else if (process.platform === 'linux') {
+        // Linux 微信数据目录
+        possiblePaths.push(join(home, '.local', 'share', 'WeChat', 'xwechat_files'))
+        possiblePaths.push(join(home, 'Documents', 'xwechat_files'))
       } else {
         // Windows 微信4.x 数据目录
         possiblePaths.push(join(home, 'Documents', 'xwechat_files'))
+        possiblePaths.push(join(home, 'Documents', 'WeChat Files'))
       }
 
       for (const path of possiblePaths) {
